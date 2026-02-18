@@ -1,22 +1,24 @@
-# 🚀 PETS - Performance Evaluation & Testing Suite
+# PETS: A Principled Framework Towards Optimal Trajectory Allocation for Efficient Test-Time Self-Consistency
 
-LLM reasoning benchmark evaluation framework using vLLM for inference. Supports multiple-choice and open-ended math benchmarks with confidence tracking and majority voting.
+![Teaser](assets/teaser.png)
 
-## 🌟 Teaser
+This repository provides the code for the paper **PETS: A Principled Framework Towards Optimal Trajectory Allocation for Efficient Test-Time Self-Consistency**.
 
-![PETS Teaser](budget_allocation/assets/teaser2.png)
+Zhangyi Liu\*, Huaizhi Qu\*, Xiaowei Yin\*, He Sun, Yanjun Han, Tianlong Chen, and Zhun Deng (\*Equal contribution, sorted alphabetically)
 
-## ✨ Overview
+**PETS** introduces a principled study of trajectory allocation for test-time scaling through an optimization framework. Central to our approach is the *self-consistency rate*, a new measure defined as agreement with the infinite-budget majority vote. We study both offline and online settings: in the offline regime, we connect trajectory allocation to crowdsourcing, yielding theoretical guarantees and an efficient majority-voting-based allocation algorithm; in the online streaming regime, we propose a novel one-shot allocation strategy that adapts budgets to question difficulty. Experiments show that PETS consistently outperforms uniform allocation. On GPQA, PETS achieves perfect self-consistency while reducing the sampling budget by up to 75% (offline) and 55% (online) relative to uniform allocation.
+
+## Overview
 
 PETS provides a complete toolchain for evaluating LLM performance on various reasoning tasks:
 
-- 🧪 **Multiple Benchmarks**: AIME, HMMT, BRUMO, GPQA, MMLU-Pro
-- 📈 **Confidence Tracking**: Per-token confidence statistics via vLLM plugin (required)
-- 🗳️ **Majority Voting**: Vote on multiple samples to improve answer accuracy
-- ⚙️ **Parallel Inference**: Multi-threaded concurrent requests for efficient large-scale evaluation
-- 🧵 **Flexible Parallelism**: Configurable tensor parallel (TP) and data parallel (DP) sizes
+- **Multiple Benchmarks**: AIME, HMMT, BRUMO, GPQA, MMLU-Pro
+- **Confidence Tracking**: Per-token confidence statistics via vLLM plugin (required)
+- **Majority Voting**: Vote on multiple samples to improve answer accuracy
+- **Parallel Inference**: Multi-threaded concurrent requests for efficient large-scale evaluation
+- **Flexible Parallelism**: Configurable tensor parallel (TP) and data parallel (DP) sizes
 
-## 🗂️ Project Structure
+## Project Structure
 
 ```
 PETS/
@@ -38,9 +40,9 @@ PETS/
     └── launch.sh          # Complete launcher (starts server + runs benchmark)
 ```
 
-## ⚡ Quick Start
+## Quick Start
 
-### 1. 📦 Install dependencies (includes confidence plugin)
+### 1. Install dependencies (includes confidence plugin)
 
 ```bash
 bash install.sh
@@ -48,7 +50,7 @@ bash install.sh
 
 This will install vLLM and the **required** confidence plugin automatically.
 
-### 2. 🏁 Run a benchmark (recommended)
+### 2. Run a benchmark (recommended)
 
 Use `launch.sh` to automatically start the vLLM server with confidence plugin and run the benchmark:
 
@@ -65,7 +67,7 @@ cd reasoning
 ./launch.sh --model-dir /path/to/your/model --task gpqa --n 32 --temp 0.6
 ```
 
-### 🔧 Alternative: Manual Server Setup
+### Alternative: Manual Server Setup
 
 If you prefer to manage the server separately:
 
@@ -88,7 +90,7 @@ cd reasoning
 python aime24.py --n 64 --temperature 1.1 --top_p 0.95
 ```
 
-## 🧵 Parallelism Configuration
+## Parallelism Configuration
 
 | Parameter | Description | Default |
 |-----------|-------------|---------|
@@ -102,7 +104,7 @@ Example configurations:
 - **8 GPUs, large model**: `--tp-size 4 --dp-size 2` (2 replicas, each on 4 GPUs)
 - **8 GPUs, huge model**: `--tp-size 8 --dp-size 1` (1 replica across all 8 GPUs)
 
-## 🔍 Confidence Plugin
+## Confidence Plugin
 
 The vLLM confidence plugin is **required** for PETS. It provides per-token confidence statistics that are used for:
 - Tracking inference quality
@@ -118,9 +120,9 @@ Configuration via environment variables:
 
 See the README in `reasoning/` for benchmark-specific details.
 
-## 🧠 Model-Specific Behavior
+## Model-Specific Behavior
 
-### 🤖 gpt-oss Models
+### gpt-oss Models
 
 When the served model name contains `gpt` (e.g. `gpt-oss-120b`), PETS automatically:
 - Forces `temperature=1` and `top_p=1` (ignoring user-provided values)
@@ -128,13 +130,13 @@ When the served model name contains `gpt` (e.g. `gpt-oss-120b`), PETS automatica
 
 These overrides are applied transparently inside `common.process_question()`. No user action is needed.
 
-## 🛠️ Tech Stack
+## Tech Stack
 
 - **Inference Engine**: vLLM 0.15.1
 - **Data Processing**: HuggingFace Datasets
 - **Answer Verification**: math-verify
 - **Monitoring Tools**: nvitop
 
-## 📄 License
+## License
 
 MIT License
