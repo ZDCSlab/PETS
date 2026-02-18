@@ -16,11 +16,11 @@ Usage:
 from __future__ import annotations
 import json, argparse, math
 from collections import Counter
-from pathlib import Path
 from typing import Dict, List, Tuple, Optional, Sequence, Union
 import numpy as np
 from collections import defaultdict
 
+from multi_run_export import export_multi_run_curves_jsonl
 from plots.offline_curves import (
     aggregate_multi_run_curve_stats,
     plot_accuracy_multi_run_curves,
@@ -63,65 +63,14 @@ def weighted_vote_majority(answers, trace_confs):
 
 
 
-def weighted_top30percent_vote_majority(answers, trace_confs):
-    
-    
+def weighted_top_percent_vote_majority(answers, trace_confs, frac: float):
     if not answers or not trace_confs:
         return ""
     indexed = [(idx, ans, float(conf)) for idx, (ans, conf) in enumerate(zip(answers, trace_confs))]
     if not indexed:
         return ""
-    top_k = max(1, int(len(indexed) * 0.3))
-    top_k = min(top_k, len(indexed))
-    top_samples = sorted(indexed, key=lambda x: x[2], reverse=True)[:top_k]
-    top_indices = {idx for idx, _, _ in top_samples}
-    weighted_cnt = defaultdict(float)
-    for _, ans, conf in top_samples:
-        weighted_cnt[ans] += conf
-    if not weighted_cnt:
-        return ""
-    max_weight = max(weighted_cnt.values())
-    tied = {a for a, w in weighted_cnt.items() if w == max_weight}
-    firstpos = {}
-    for idx, ans in enumerate(answers):
-        if idx in top_indices and ans in tied and ans not in firstpos:
-            firstpos[ans] = idx
-    return min(tied, key=lambda a: firstpos[a]) if firstpos else ""
-
-
-def weighted_top50percent_vote_majority(answers, trace_confs):
- 
-    if not answers or not trace_confs:
-        return ""
-    indexed = [(idx, ans, float(conf)) for idx, (ans, conf) in enumerate(zip(answers, trace_confs))]
-    if not indexed:
-        return ""
-    top_k = max(1, int(len(indexed) * 0.5))
-    top_k = min(top_k, len(indexed))
-    top_samples = sorted(indexed, key=lambda x: x[2], reverse=True)[:top_k]
-    top_indices = {idx for idx, _, _ in top_samples}
-    weighted_cnt = defaultdict(float)
-    for _, ans, conf in top_samples:
-        weighted_cnt[ans] += conf
-    if not weighted_cnt:
-        return ""
-    max_weight = max(weighted_cnt.values())
-    tied = {a for a, w in weighted_cnt.items() if w == max_weight}
-    firstpos = {}
-    for idx, ans in enumerate(answers):
-        if idx in top_indices and ans in tied and ans not in firstpos:
-            firstpos[ans] = idx
-    return min(tied, key=lambda a: firstpos[a]) if firstpos else ""
-
-
-def weighted_top70percent_vote_majority(answers, trace_confs):
-
-    if not answers or not trace_confs:
-        return ""
-    indexed = [(idx, ans, float(conf)) for idx, (ans, conf) in enumerate(zip(answers, trace_confs))]
-    if not indexed:
-        return ""
-    top_k = max(1, int(len(indexed) * 0.7))
+    frac = max(0.0, min(1.0, float(frac)))
+    top_k = max(1, int(len(indexed) * frac))
     top_k = min(top_k, len(indexed))
     top_samples = sorted(indexed, key=lambda x: x[2], reverse=True)[:top_k]
     top_indices = {idx for idx, _, _ in top_samples}
@@ -140,53 +89,23 @@ def weighted_top70percent_vote_majority(answers, trace_confs):
 
 
 def weighted_top10percent_vote_majority(answers, trace_confs):
+    return weighted_top_percent_vote_majority(answers, trace_confs, 0.1)
 
-    if not answers or not trace_confs:
-        return ""
-    indexed = [(idx, ans, float(conf)) for idx, (ans, conf) in enumerate(zip(answers, trace_confs))]
-    if not indexed:
-        return ""
-    top_k = max(1, int(len(indexed) * 0.1))
-    top_k = min(top_k, len(indexed))
-    top_samples = sorted(indexed, key=lambda x: x[2], reverse=True)[:top_k]
-    top_indices = {idx for idx, _, _ in top_samples}
-    weighted_cnt = defaultdict(float)
-    for _, ans, conf in top_samples:
-        weighted_cnt[ans] += conf
-    if not weighted_cnt:
-        return ""
-    max_weight = max(weighted_cnt.values())
-    tied = {a for a, w in weighted_cnt.items() if w == max_weight}
-    firstpos = {}
-    for idx, ans in enumerate(answers):
-        if idx in top_indices and ans in tied and ans not in firstpos:
-            firstpos[ans] = idx
-    return min(tied, key=lambda a: firstpos[a]) if firstpos else ""
+
+def weighted_top30percent_vote_majority(answers, trace_confs):
+    return weighted_top_percent_vote_majority(answers, trace_confs, 0.3)
+
+
+def weighted_top50percent_vote_majority(answers, trace_confs):
+    return weighted_top_percent_vote_majority(answers, trace_confs, 0.5)
+
+
+def weighted_top70percent_vote_majority(answers, trace_confs):
+    return weighted_top_percent_vote_majority(answers, trace_confs, 0.7)
 
 
 def weighted_top90percent_vote_majority(answers, trace_confs):
-  
-    if not answers or not trace_confs:
-        return ""
-    indexed = [(idx, ans, float(conf)) for idx, (ans, conf) in enumerate(zip(answers, trace_confs))]
-    if not indexed:
-        return ""
-    top_k = max(1, int(len(indexed) * 0.9))
-    top_k = min(top_k, len(indexed))
-    top_samples = sorted(indexed, key=lambda x: x[2], reverse=True)[:top_k]
-    top_indices = {idx for idx, _, _ in top_samples}
-    weighted_cnt = defaultdict(float)
-    for _, ans, conf in top_samples:
-        weighted_cnt[ans] += conf
-    if not weighted_cnt:
-        return ""
-    max_weight = max(weighted_cnt.values())
-    tied = {a for a, w in weighted_cnt.items() if w == max_weight}
-    firstpos = {}
-    for idx, ans in enumerate(answers):
-        if idx in top_indices and ans in tied and ans not in firstpos:
-            firstpos[ans] = idx
-    return min(tied, key=lambda a: firstpos[a]) if firstpos else ""
+    return weighted_top_percent_vote_majority(answers, trace_confs, 0.9)
 
 
 VARIANT_FUNC_MAP = {
@@ -548,212 +467,6 @@ def compute_baseline_curve(qids: List, pools: Dict[str, List[str]],
 
 
     return curves
-
-
-# ==================== Multi-run helpers ====================
-
-
-def _first_budget_at_max(points: Sequence[Tuple[int, float]]) -> Optional[int]:
-    """Return the smallest budget that achieves the maximum value in points."""
-    if not points:
-        return None
-    best_val: Optional[float] = None
-    best_budget: Optional[int] = None
-    for b, v in points:
-        try:
-            bb = int(b)
-            vv = float(v)
-        except Exception:
-            continue
-        if not math.isfinite(vv):
-            continue
-        if best_val is None or vv > best_val:
-            best_val = vv
-            best_budget = bb
-        elif best_val is not None and vv == best_val:
-            if best_budget is None or bb < best_budget:
-                best_budget = bb
-    return best_budget
-
-
-def _points_to_budget_map(points: Sequence[Tuple[int, float]]) -> Dict[int, float]:
-    """Convert (budget, value) points into a {budget -> value} mapping."""
-    out: Dict[int, float] = {}
-    for b, v in points or []:
-        try:
-            out[int(b)] = float(v)
-        except Exception:
-            continue
-    return out
-
-
-def _scalar_mean_std(values: Sequence[Optional[Union[int, float]]]) -> Tuple[float, float, int]:
-
-    arr = np.asarray([float(v) for v in values if v is not None and math.isfinite(float(v))], dtype=float)
-    if arr.size == 0:
-        return float("nan"), float("nan"), 0
-    mean = float(np.mean(arr))
-    std = float(np.std(arr, ddof=1)) if arr.size > 1 else 0.0
-    return mean, std, int(arr.size)
-
-
-def export_multi_run_curves_jsonl(
-    curve_runs_consistency: Sequence[Tuple[int, Dict[str, List[Tuple[int, float]]]]],
-    curve_runs_accuracy: Sequence[Tuple[int, Dict[str, List[Tuple[int, float]]]]],
-    output_path: str,
-    *,
-    methods: Optional[Sequence[str]] = None,
-) -> None:
-
-    wanted = list(methods or ["Base", "Base_Conf", "OKG", "OKG_Conf"])
-
-    cons_by_run: Dict[int, Dict[str, List[Tuple[int, float]]]] = {i: d for i, d in (curve_runs_consistency or [])}
-    acc_by_run: Dict[int, Dict[str, List[Tuple[int, float]]]] = {i: d for i, d in (curve_runs_accuracy or [])}
-    run_indices = sorted(set(cons_by_run.keys()) | set(acc_by_run.keys()))
-
-    def _find_key(curves: Dict[str, List[Tuple[int, float]]], canonical: str) -> Optional[str]:
-        if not curves:
-            return None
-        if canonical in curves:
-            return canonical
-        low = canonical.lower()
-        for k in curves.keys():
-            if str(k).lower() == low:
-                return k
-        # accept mv as Base alias
-        if low == "base":
-            for k in curves.keys():
-                if str(k).lower() in ("mv", "base"):
-                    return k
-        # Backward-compatible aliasing: when callers request Base_Conf/OKG_Conf but the
-        # actual curves are named Base_<variant>/OKG_<variant> (e.g., tail_top70),
-        # map to a reasonable existing candidate.
-        if low in ("base_conf", "okg_conf"):
-            keys = [str(k) for k in curves.keys()]
-
-            def _base_candidates() -> List[str]:
-                return sorted([k for k in keys if k.startswith("Base_") and k != "Base"])
-
-            def _okg_candidates() -> List[str]:
-                return sorted([k for k in keys if k.startswith("OKG_") and k != "OKG"])
-
-            if low == "base_conf":
-                cand = _base_candidates()
-                if not cand:
-                    return None
-                if "Base_Conf" in cand:
-                    return "Base_Conf"
-                if len(cand) == 1:
-                    return cand[0]
-                for k in cand:
-                    if "conf" in k.lower():
-                        return k
-                return cand[0]
-
-            if low == "okg_conf":
-                okg_cand = _okg_candidates()
-                if not okg_cand:
-                    return None
-                if "OKG_Conf" in okg_cand:
-                    return "OKG_Conf"
-                base_cand = _base_candidates()
-                if base_cand:
-                    base_pick = "Base_Conf" if "Base_Conf" in base_cand else base_cand[0]
-                    suffix = base_pick[len("Base_") :]
-                    aligned = f"OKG_{suffix}"
-                    if aligned in okg_cand:
-                        return aligned
-                if len(okg_cand) == 1:
-                    return okg_cand[0]
-                for k in okg_cand:
-                    if "conf" in k.lower():
-                        return k
-                return okg_cand[0]
-        return None
-
-    # Derived stats buckets across runs
-    budgets_at_cons1: Dict[str, List[Optional[int]]] = {m: [] for m in wanted}
-    at_okg_budget_acc: Dict[str, List[Optional[float]]] = {m: [] for m in wanted}
-    at_okg_budget_cons: Dict[str, List[Optional[float]]] = {m: [] for m in wanted}
-
-    out_path_obj = Path(output_path)
-    out_path_obj.parent.mkdir(parents=True, exist_ok=True)
-    with out_path_obj.open("w", encoding="utf-8") as f:
-        for run_idx in run_indices:
-            cons_curves = cons_by_run.get(run_idx, {}) or {}
-            acc_curves = acc_by_run.get(run_idx, {}) or {}
-
-            peak_budget_for: Dict[str, Optional[int]] = {}
-            for m in wanted:
-                k = _find_key(cons_curves, m)
-                bpk = _first_budget_at_max(cons_curves.get(k, []) if k else [])
-                peak_budget_for[m] = bpk
-                budgets_at_cons1[m].append(bpk)
-
-            okg_budget = peak_budget_for.get("OKG")
-
-            at_budget_for_run: Dict[str, Dict[str, Optional[float]]] = {}
-            for m in wanted:
-                cons_key = _find_key(cons_curves, m)
-                acc_key = _find_key(acc_curves, m)
-                cons_map = _points_to_budget_map(cons_curves.get(cons_key, []) if cons_key else [])
-                acc_map = _points_to_budget_map(acc_curves.get(acc_key, []) if acc_key else [])
-
-                c_val = cons_map.get(int(okg_budget)) if okg_budget is not None else None
-                a_val = acc_map.get(int(okg_budget)) if okg_budget is not None else None
-                at_budget_for_run[m] = {"consistency": c_val, "accuracy": a_val}
-                at_okg_budget_cons[m].append(c_val)
-                at_okg_budget_acc[m].append(a_val)
-
-            record: Dict[str, object] = {
-                "type": "run",
-                "run_index": int(run_idx),
-                "curves": {
-                    m: {
-                        "consistency": cons_curves.get(_find_key(cons_curves, m) or "", []),
-                        "accuracy": acc_curves.get(_find_key(acc_curves, m) or "", []),
-                    }
-                    for m in wanted
-                },
-                # (1) per-method peak-consistency budgets
-                "OKG_budget_at_cons1": okg_budget,
-                "base_budget_at_cons1": peak_budget_for.get("Base"),
-                "base_conf_budget_at_cons1": peak_budget_for.get("Base_Conf"),
-                "OKG_conf_budget_at_cons1": peak_budget_for.get("OKG_Conf"),
-                # (2) metrics at OKG's peak-consistency budget (per run)
-                "base_consistency_at_con1": at_budget_for_run.get("Base", {}).get("consistency"),
-                "base_accuracy_at_con1": at_budget_for_run.get("Base", {}).get("accuracy"),
-                "base_conf_consistency_at_con1": at_budget_for_run.get("Base_Conf", {}).get("consistency"),
-                "base_conf_accuracy_at_con1": at_budget_for_run.get("Base_Conf", {}).get("accuracy"),
-                "OKG_consistency_at_con1": at_budget_for_run.get("OKG", {}).get("consistency"),
-                "OKG_accuracy_at_con1": at_budget_for_run.get("OKG", {}).get("accuracy"),
-                "OKG_conf_consistency_at_con1": at_budget_for_run.get("OKG_Conf", {}).get("consistency"),
-                "OKG_conf_accuracy_at_con1": at_budget_for_run.get("OKG_Conf", {}).get("accuracy"),
-            }
-            f.write(json.dumps(record, ensure_ascii=False) + "\n")
-
-        summary: Dict[str, object] = {"type": "summary", "num_runs": int(len(run_indices))}
-
-        budget_stats: Dict[str, Dict[str, Union[int, float]]] = {}
-        for m in wanted:
-            mean, std, n = _scalar_mean_std(budgets_at_cons1[m])
-            budget_stats[m] = {"mean": mean, "std": std, "num_runs": n}
-        summary["budget_at_cons1_stats"] = budget_stats
-
-        metric_stats: Dict[str, Dict[str, Dict[str, Union[int, float]]]] = {}
-        for m in wanted:
-            a_mean, a_std, a_n = _scalar_mean_std(at_okg_budget_acc[m])
-            c_mean, c_std, c_n = _scalar_mean_std(at_okg_budget_cons[m])
-            metric_stats[m] = {
-                "accuracy_at_con1": {"mean": a_mean, "std": a_std, "num_runs": a_n},
-                "consistency_at_con1": {"mean": c_mean, "std": c_std, "num_runs": c_n},
-            }
-        summary["metrics_at_okg_cons1_budget_stats"] = metric_stats
-
-        f.write(json.dumps(summary, ensure_ascii=False) + "\n")
-
-    print(f"[multi-run] curves+stats jsonl saved: {out_path_obj}")
-
 
 
 #===============================================================
