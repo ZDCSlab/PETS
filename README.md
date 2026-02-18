@@ -6,8 +6,6 @@ LLM reasoning benchmark evaluation framework using vLLM for inference. Supports 
 
 ![PETS Teaser](budget_allocation/assets/teaser2.png)
 
-📄 Full teaser PDF: [`budget_allocation/assets/teaser2.pdf`](budget_allocation/assets/teaser2.pdf)
-
 ## ✨ Overview
 
 PETS provides a complete toolchain for evaluating LLM performance on various reasoning tasks:
