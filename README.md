@@ -1,6 +1,8 @@
 # PETS: A Principled Framework Towards Optimal Trajectory Allocation for Efficient Test-Time Self-Consistency
 
-![Teaser](assets/teaser.png)
+<p align="center">
+  <img src="assets/teaser.png" width="75%">
+</p>
 
 This repository provides the code for the paper **PETS: A Principled Framework Towards Optimal Trajectory Allocation for Efficient Test-Time Self-Consistency**.
 
