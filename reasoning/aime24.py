@@ -1,0 +1,94 @@
+#!/usr/bin/env python3
+"""AIME 2024 inference and evaluation."""
+
+import argparse
+import re
+
+import common
+
+
+PROMPT_TEMPLATE = """\
+Solve the following math problem step by step. Put your final answer
+in a \\boxed{{}} command.
+
+{problem}
+
+Remember to put your final answer in \\boxed{{}}.
+
+Reasoning:"""
+
+
+def build_prompt(item):
+    problem = item.get("problem") or item.get("question") or item.get("prompt", "")
+    return PROMPT_TEMPLATE.format(problem=problem)
+
+
+def extract_answer(text, default=""):
+    """Extract answer from \\boxed{}, with fallbacks."""
+    boxed = common.extract_boxed(text)
+    if boxed:
+        return boxed
+    match = re.search(r"ANSWER:\s*(.+?)(?:\n|$)", text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    lines = text.strip().split("\n")
+    if lines and lines[-1].strip() and not lines[-1].strip().endswith(("?", ".")):
+        return lines[-1].strip()
+    return default
+
+
+def evaluate(results_path):
+    from math_verify import parse, verify
+    from math_verify.parser import ExprExtractionConfig
+
+    results = common.load_results(results_path)
+    total = correct = 0
+    for res in results:
+        if not res.get("success"):
+            continue
+        total += 1
+        gold = parse(str(res.get("answer", "")).strip(),
+                      extraction_config=[ExprExtractionConfig()])
+        pred = parse(str(res.get("pred", "")).strip())
+        if verify(gold, pred):
+            correct += 1
+    acc = f"{100 * correct / total:.1f}%" if total else "N/A"
+    print(f"AIME 2024: {correct}/{total} = {acc}")
+
+
+def main():
+    ap = argparse.ArgumentParser(description="AIME 2024 Inference & Evaluation")
+    common.add_common_args(ap)
+    ap.add_argument(
+        "--data_path",
+        default="HuggingFaceH4/aime_2024",
+        help="Local parquet directory or HuggingFace dataset name (default: HuggingFaceH4/aime_2024)",
+    )
+    ap.add_argument("--out", default="aime24_preds.jsonl", help="Output JSONL path")
+    args = ap.parse_args()
+
+    if args.eval_only:
+        evaluate(args.out)
+        return
+
+    client, model = common.create_client(args.host, args.port, args.model_name)
+    dataset = common.load_parquet_or_hf(args.data_path, split="train")
+    if args.limit:
+        dataset = dataset[:args.limit]
+    print(f"Loaded {len(dataset)} problems\n")
+
+    def process(item):
+        return common.process_question(
+            client, model, item,
+            n_samples=args.n, temperature=args.temperature,
+            top_p=args.top_p, top_logprobs=args.top_logprobs,
+            prompt_text=build_prompt(item),
+            extract_fn=extract_answer,
+            system_prompt="You are a helpful assistant that solves math problems.",
+        )
+
+    common.run_inference(dataset, process, args.out, args.max_workers, desc="AIME 2024")
+
+
+if __name__ == "__main__":
+    main()

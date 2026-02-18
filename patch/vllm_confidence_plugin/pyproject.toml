@@ -1,0 +1,11 @@
+[build-system]
+requires = ["setuptools", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "vllm-confidence-plugin"
+version = "0.1.0"
+dependencies = ["vllm", "pydantic"]
+
+[project.entry-points."vllm.general_plugins"]
+confidence_logprobs = "vllm_confidence_plugin:register"
