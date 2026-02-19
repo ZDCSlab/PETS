@@ -66,6 +66,5 @@ Input is prediction JSONL where each line contains (at minimum):
 
 ## Notes
 
-- `MultiChoice_online.py` depends on `gpqa_streaming.py`.
-- `FillintheBlank_online.py` depends on `mmlu_streaming.py`.
-- If these base modules are not in your `PYTHONPATH`, online scripts will fail at import time.
+- `MultiChoice_online.py` and `FillintheBlank_online.py` are now self-contained.
+- Streaming base helpers from historical `gpqa_streaming.py` / `mmlu_streaming.py` have been inlined.
