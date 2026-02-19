@@ -66,5 +66,6 @@ Input is prediction JSONL where each line contains (at minimum):
 
 ## Notes
 
-- `MultiChoice_online.py` and `FillintheBlank_online.py` are now self-contained.
-- Streaming base helpers from historical `gpqa_streaming.py` / `mmlu_streaming.py` have been inlined.
+- `MultiChoice_online.py` now inlines the previously shared streaming utilities.
+- `FillintheBlank_online.py` now inlines the previously shared streaming utilities.
+- No extra base-module import is required for online scripts.

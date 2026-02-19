@@ -2,8 +2,8 @@
 """
 Oracle difficulty via KMeans (k=5) for (a,b) fits (GPQA).
 
-This file contains an inlined streaming core (historically from `gpqa_streaming.py`):
-- Predictor training / streaming policy stays the same (now explicit in this file).
+This file is a variant of `gpqa_streaming.py`:
+- Predictor training / streaming policy stays the same (reused from gpqa_streaming).
 - Oracle setting changes from (a,b) quantile grid to kmeans buckets.
 
 Workflow (oracle):
@@ -14,6 +14,7 @@ Workflow (oracle):
 """
 
 from __future__ import annotations
+
 
 import argparse
 import csv
@@ -37,9 +38,8 @@ from oracle_kmeans_common import (
     locate_param_bin_oracle as locate_param_bin_oracle_common,
 )
 
-
 # -----------------------------
-# Inlined GPQA streaming core
+# Inlined from gpqa_streaming.py (without CLI entrypoint)
 # -----------------------------
 K0 = 4  # warm-up samples
 NUM_BUCKETS = 5
@@ -2226,15 +2226,38 @@ def train_and_build_budget_plan(
     return stats, plan
 
 
-# -----------------------------
-# CLI entrypoint
-# -----------------------------
 
+
+class _BaseNamespace:
+    """Local compatibility namespace replacing `import gpqa_streaming as base`."""
+
+
+base = _BaseNamespace()
+base.K0 = K0
+base.QuestionRecord = QuestionRecord
+base.PerQuestionFit = PerQuestionFit
+base.BucketStats = BucketStats
+base.BudgetPlan = BudgetPlan
+base.bucket_from_samples4 = bucket_from_samples4
+base.A_probit = A_probit
+base.compute_question_param_map = compute_question_param_map
+base.majority_vote_with_tie_break = majority_vote_with_tie_break
+base.solve_budget_plan_greedy_marginal = solve_budget_plan_greedy_marginal
+base.evaluate_streaming = evaluate_streaming
+base.evaluate_fixed_budget_majority = evaluate_fixed_budget_majority
+base.load_gpqa_jsonl = load_gpqa_jsonl
+base.train_and_build_budget_plan = train_and_build_budget_plan
+base.shuffle_subsample_and_relabel_question_records = shuffle_subsample_and_relabel_question_records
+base.aggregate_multi_run_accuracy_stats = aggregate_multi_run_accuracy_stats
+base._sweep_runs_to_curve_runs_total = _sweep_runs_to_curve_runs_total
+base.plot_accuracy_multi_run_curves = plot_accuracy_multi_run_curves
+base.plot_consistency_multi_run_curves = plot_consistency_multi_run_curves
+base.export_multi_run_curves_jsonl = export_multi_run_curves_jsonl
 def weighted_majority_vote_min(samples: Sequence[object], weights: Sequence[object]) -> Optional[object]:
     """Confidence-weighted majority vote.
 
     Aggregates weights per label, then tie-breaks by the minimal label to mirror
-    `majority_vote_with_tie_break`.
+    `base.majority_vote_with_tie_break`.
     """
     if not samples:
         return None
@@ -2269,7 +2292,7 @@ def weighted_vote_variant(
       - "weighted": use all samples
       - "top10"/"top30"/"top50"/"top70"/"top90": keep only the top-X% samples by weight
 
-    Tie-break is deterministic via minimal label, matching majority_vote_with_tie_break.
+    Tie-break is deterministic via minimal label, matching base.majority_vote_with_tie_break.
     """
     if not samples:
         return None
@@ -2315,7 +2338,7 @@ def weighted_vote_variant(
     return min(winners)
 
 
-def _pseudo_label_conf_from_full_pool(q: QuestionRecord, *, conf_variant: str) -> Optional[object]:
+def _pseudo_label_conf_from_full_pool(q: base.QuestionRecord, *, conf_variant: str) -> Optional[object]:
     """Run-specific pseudo label for confidence-weighted consistency.
 
     Uses the full pool (typically 64 answers + confidences) from the current run.
@@ -2333,8 +2356,8 @@ def _pseudo_label_conf_from_full_pool(q: QuestionRecord, *, conf_variant: str) -
 
 
 def evaluate_streaming_conf(
-    test_questions: Sequence[QuestionRecord],
-    budget_plan: BudgetPlan,
+    test_questions: Sequence[base.QuestionRecord],
+    budget_plan: base.BudgetPlan,
     *,
     conf_variant: str = "weighted",
 ) -> Dict[str, float]:
@@ -2353,10 +2376,10 @@ def evaluate_streaming_conf(
             continue
 
         # Deterministic predictor: bucket from first K0, then take B_target prefix.
-        if len(answers) < int(K0):
+        if len(answers) < int(base.K0):
             skipped += 1
             continue
-        t = bucket_from_samples4(answers[: int(K0)])
+        t = base.bucket_from_samples4(answers[: int(base.K0)])
         B_target = int(budget_plan.B_t[int(t) - 1])
         k = min(int(B_target), len(answers))
         samples = answers[:k]
@@ -2392,13 +2415,13 @@ def evaluate_streaming_conf(
 
 
 def evaluate_fixed_budget_majority_conf(
-    test_questions: Sequence[QuestionRecord],
+    test_questions: Sequence[base.QuestionRecord],
     per_question_budget: int,
     *,
     conf_variant: str = "weighted",
 ) -> Dict[str, float]:
     """Baseline evaluation with fixed prefix budget, but weighted voting."""
-    budget = max(int(K0), int(per_question_budget))
+    budget = max(int(base.K0), int(per_question_budget))
 
     evaluated_acc = 0
     evaluated_cons = 0
@@ -2453,7 +2476,7 @@ def build_oracle_difficulty_model(
     """Fit KMeans(k=5) model on training (a,b) and return bucket centers + probs."""
     return build_oracle_difficulty_model_from_params(
         train_params,
-        score_fn=lambda a, b: float(A_probit(1, float(a), float(b))),
+        score_fn=lambda a, b: float(base.A_probit(1, float(a), float(b))),
         k=int(k),
         random_seed=int(random_seed),
     )
@@ -2484,7 +2507,7 @@ def greedy_budget_allocation_oracle(
         """
         a, b = float(centers[t, 0]), float(centers[t, 1])
 
-        # Local import; scipy is required by the inlined streaming core.
+        # Local import: scipy is already required by `gpqa_streaming.py`.
         from scipy.stats import norm  # type: ignore
 
         x1 = float(a * math.sqrt(float(cur)) + b)
@@ -2495,7 +2518,7 @@ def greedy_budget_allocation_oracle(
         logsf2 = float(norm.logsf(x2))
         if not (math.isfinite(logsf1) and math.isfinite(logsf2)):
             # Fallback: best-effort numeric (may be 0 when saturated).
-            return float(A_probit(cur + 1, a, b) - A_probit(cur, a, b))
+            return float(base.A_probit(cur + 1, a, b) - base.A_probit(cur, a, b))
 
         # sf_diff = exp(logsf_small) - exp(logsf_large) computed stably.
         # Ensure logsf1 >= logsf2 (expected), otherwise swap.
@@ -2526,8 +2549,8 @@ def locate_param_bin_oracle(
 
 
 def evaluate_oracle_setting(
-    train_questions: Sequence[QuestionRecord],
-    test_questions: Sequence[QuestionRecord],
+    train_questions: Sequence[base.QuestionRecord],
+    test_questions: Sequence[base.QuestionRecord],
     *,
     add_conf: bool = True,
     conf_variant: str = "weighted",
@@ -2551,12 +2574,12 @@ def evaluate_oracle_setting(
     test_params = oracle_test_params_override
 
     if oracle_model is None or test_params is None:
-        train_params = compute_question_param_map(
+        train_params = base.compute_question_param_map(
             train_questions,
             k_max_curve=k_max_curve,
             curve_mc_trials=curve_mc_trials,
         )
-        test_params = compute_question_param_map(
+        test_params = base.compute_question_param_map(
             test_questions,
             k_max_curve=k_max_curve,
             curve_mc_trials=curve_mc_trials,
@@ -2608,7 +2631,7 @@ def evaluate_oracle_setting(
         total_budget_used += float(len(samples))
         per_bucket_budget[bucket] += float(len(samples))
 
-        pred = majority_vote_with_tie_break(samples)
+        pred = base.majority_vote_with_tie_break(samples)
         pred_conf = None
         if add_conf:
             pred_conf = weighted_vote_variant(
@@ -2654,8 +2677,8 @@ def evaluate_oracle_setting(
 
 
 def sweep_average_budgets(
-    stats: BucketStats,
-    test_questions: Sequence[QuestionRecord],
+    stats: base.BucketStats,
+    test_questions: Sequence[base.QuestionRecord],
     *,
     add_conf: bool = True,
     conf_variant: str = "weighted",
@@ -2668,14 +2691,14 @@ def sweep_average_budgets(
     """Sweep average budgets and collect predictor/baseline/oracle metrics (oracle=kmeans)."""
     rows: List[Dict[str, object]] = []
 
-    start_budget = max(K0, 1)
+    start_budget = max(base.K0, 1)
     for avg_budget in range(start_budget, sweep_max + 1):
-        plan = solve_budget_plan_greedy_marginal(stats, B_bar=float(avg_budget), B_max=B_max, k0=K0)
-        predictor_metrics, _ = evaluate_streaming(test_questions, plan, rng_seed=rng_seed)
+        plan = base.solve_budget_plan_greedy_marginal(stats, B_bar=float(avg_budget), B_max=B_max, k0=base.K0)
+        predictor_metrics, _ = base.evaluate_streaming(test_questions, plan, rng_seed=rng_seed)
         predictor_conf_metrics: Dict[str, float] = {}
         if add_conf:
             predictor_conf_metrics = evaluate_streaming_conf(test_questions, plan, conf_variant=str(conf_variant))
-        baseline_metrics = evaluate_fixed_budget_majority(
+        baseline_metrics = base.evaluate_fixed_budget_majority(
             test_questions, per_question_budget=avg_budget, rng_seed=rng_seed
         )
         baseline_conf_metrics: Dict[str, float] = {}
@@ -2890,7 +2913,7 @@ def main() -> None:
     args = parser.parse_args()
 
     data_path = Path(args.data_path)
-    all_questions = load_gpqa_jsonl(str(data_path), conf_metric=str(args.conf_metric))
+    all_questions = base.load_gpqa_jsonl(str(data_path), conf_metric=str(args.conf_metric))
     if len(all_questions) <= args.train_size:
         raise ValueError(f"Dataset needs more than {args.train_size} questions to create a test split.")
 
@@ -2898,7 +2921,7 @@ def main() -> None:
     test_questions = all_questions[args.train_size :]
 
     # predictor training and evaluation setup
-    stats, plan = train_and_build_budget_plan(
+    stats, plan = base.train_and_build_budget_plan(
         train_questions,
         B_bar=args.average_budget,
         k_max_curve=args.k_max_curve,
@@ -2915,20 +2938,20 @@ def main() -> None:
     print(f"Expected average budget (predictor): {expected_budget:.2f}")
 
     # predictor/baseline/oracle evaluation
-    predictor_metrics, _results = evaluate_streaming(test_questions, plan, rng_seed=args.rng_seed)
-    baseline_metrics = evaluate_fixed_budget_majority(
+    predictor_metrics, _results = base.evaluate_streaming(test_questions, plan, rng_seed=args.rng_seed)
+    baseline_metrics = base.evaluate_fixed_budget_majority(
         test_questions, per_question_budget=args.average_budget, rng_seed=args.rng_seed
     )
 
     # Oracle preparation (train/test (a,b) fits). Compute once and reuse.
     # Optionally fit oracle buckets on full data for a stronger (leaky) upper bound.
     oracle_fit_questions = all_questions if bool(getattr(args, "oracle_fit_all", False)) else train_questions
-    train_params_oracle = compute_question_param_map(
+    train_params_oracle = base.compute_question_param_map(
         oracle_fit_questions,
         k_max_curve=args.k_max_curve,
         curve_mc_trials=args.curve_mc_trials,
     )
-    test_params_oracle = compute_question_param_map(
+    test_params_oracle = base.compute_question_param_map(
         test_questions,
         k_max_curve=args.k_max_curve,
         curve_mc_trials=args.curve_mc_trials,
@@ -2991,13 +3014,13 @@ def main() -> None:
             sweep_runs: List[Tuple[int, Sequence[Dict[str, object]]]] = []
             for run_idx in range(args.multi_runs):
                 rng = random.Random(args.rng_seed + run_idx)
-                train_q_run = shuffle_subsample_and_relabel_question_records(
+                train_q_run = base.shuffle_subsample_and_relabel_question_records(
                     train_questions,
                     rng,
                     pool_size=int(args.multi_pool_size),
                     relabel_with_pool_mv=bool(args.multi_relabel_mv),
                 )
-                test_q_run = shuffle_subsample_and_relabel_question_records(
+                test_q_run = base.shuffle_subsample_and_relabel_question_records(
                     test_questions,
                     rng,
                     pool_size=int(args.multi_pool_size),
@@ -3011,12 +3034,12 @@ def main() -> None:
                 )
 
                 # oracle preparation
-                train_params_run = compute_question_param_map(
+                train_params_run = base.compute_question_param_map(
                     oracle_fit_q_run,
                     k_max_curve=args.k_max_curve,
                     curve_mc_trials=args.curve_mc_trials,
                 )
-                test_params_run = compute_question_param_map(
+                test_params_run = base.compute_question_param_map(
                     test_q_run,
                     k_max_curve=args.k_max_curve,
                     curve_mc_trials=args.curve_mc_trials,
@@ -3026,7 +3049,7 @@ def main() -> None:
                 )
 
                 # predictor preparation
-                stats_run, _plan_run = train_and_build_budget_plan(
+                stats_run, _plan_run = base.train_and_build_budget_plan(
                     train_q_run,
                     B_bar=args.average_budget,
                     k_max_curve=args.k_max_curve,
@@ -3073,7 +3096,7 @@ def main() -> None:
                         )
 
             if sweep_runs:
-                summaries = aggregate_multi_run_accuracy_stats(sweep_runs)
+                summaries = base.aggregate_multi_run_accuracy_stats(sweep_runs)
                 print("\nMulti-run predictor summary (avg_budget, total_mean±std, acc_mean±std, runs):")
                 for entry in summaries.get("predictor", []):
                     print(
@@ -3092,20 +3115,20 @@ def main() -> None:
                     )
 
                 # Reference-style plots + CSVs for BOTH metrics (accuracy + consistency)
-                curve_runs_acc = _sweep_runs_to_curve_runs_total(sweep_runs, metric="accuracy")
-                curve_runs_cons = _sweep_runs_to_curve_runs_total(sweep_runs, metric="consistency")
-                plot_accuracy_multi_run_curves(
+                curve_runs_acc = base._sweep_runs_to_curve_runs_total(sweep_runs, metric="accuracy")
+                curve_runs_cons = base._sweep_runs_to_curve_runs_total(sweep_runs, metric="consistency")
+                base.plot_accuracy_multi_run_curves(
                     sweep_runs,
                     args.accuracy_plot,
                     csv_path=(args.accuracy_csv if args.accuracy_csv else None),
                 )
-                plot_consistency_multi_run_curves(
+                base.plot_consistency_multi_run_curves(
                     sweep_runs,
                     args.consistency_plot,
                     csv_path=(args.consistency_csv if args.consistency_csv else None),
                 )
                 if args.multi_run_jsonl:
-                    export_multi_run_curves_jsonl(
+                    base.export_multi_run_curves_jsonl(
                         curve_runs_cons,
                         curve_runs_acc,
                         str(args.multi_run_jsonl),
@@ -3141,20 +3164,20 @@ def main() -> None:
                             f"oracle_expected={row.get('oracle_expected', float('nan')):.2f}"
                         )
 
-                curve_runs_acc = _sweep_runs_to_curve_runs_total([(0, sweep_rows)], metric="accuracy")
-                curve_runs_cons = _sweep_runs_to_curve_runs_total([(0, sweep_rows)], metric="consistency")
-                plot_accuracy_multi_run_curves(
+                curve_runs_acc = base._sweep_runs_to_curve_runs_total([(0, sweep_rows)], metric="accuracy")
+                curve_runs_cons = base._sweep_runs_to_curve_runs_total([(0, sweep_rows)], metric="consistency")
+                base.plot_accuracy_multi_run_curves(
                     [(0, sweep_rows)],
                     args.accuracy_plot,
                     csv_path=(args.accuracy_csv if args.accuracy_csv else None),
                 )
-                plot_consistency_multi_run_curves(
+                base.plot_consistency_multi_run_curves(
                     [(0, sweep_rows)],
                     args.consistency_plot,
                     csv_path=(args.consistency_csv if args.consistency_csv else None),
                 )
                 if args.multi_run_jsonl:
-                    export_multi_run_curves_jsonl(
+                    base.export_multi_run_curves_jsonl(
                         curve_runs_cons,
                         curve_runs_acc,
                         str(args.multi_run_jsonl),

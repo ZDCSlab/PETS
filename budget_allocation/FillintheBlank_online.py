@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-AIME streaming (bucketed allocation) with inlined streaming core logic.
+AIME streaming (bucketed allocation) adapted from `mmlu_streaming.py`.
 
 Key difference:
   - AIME is fill-in (free-form) answers with potentially many unique strings.
@@ -19,8 +19,6 @@ Notes:
 from __future__ import annotations
 
 import argparse
-import csv
-import heapq
 import json
 import math
 import random
@@ -29,10 +27,10 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple, Union
 
-import matplotlib.pyplot as plt
 import numpy as np
-from scipy.stats import norm
 
+import matplotlib.pyplot as plt
+from scipy.stats import norm
 from oracle_kmeans_common import (
     OracleDifficultyModelKMeans,
     build_oracle_difficulty_model_from_params,
@@ -44,126 +42,40 @@ from plots.online_sweep import (
     plot_consistency_multi_run_curves,
 )
 
-
-# -----------------------------
-# Inlined MMLU streaming core
-# -----------------------------
 K0 = 4  # warm-up samples
-NUM_BUCKETS = 5
-ORACLE_QUANTILES = (0.33, 0.69)
-
-# Five possible sorted count patterns for 4 samples (descending)
-PATTERNS: List[Tuple[int, int, int, int]] = [
-    (4, 0, 0, 0),
-    (3, 1, 0, 0),
-    (2, 2, 0, 0),
-    (2, 1, 1, 0),
-    (1, 1, 1, 1),
-]
-
-
-# -----------------------------
-# Data structures
-# -----------------------------
-@dataclass(frozen=True)
-class QuestionRecord:
-    """A question with an answer pool and (optional) ground-truth label.
-
-    answers: each element is an option label (e.g., "A","B","C","D") or int {0,1,2,3}
-    correct: the correct option label/index if available (needed to compute accuracy curve)
-    """
-    qid: str
-    answers: Sequence  # length e.g. 64 in training
-    correct: Optional[object] = None
 
 
 @dataclass
 class PerQuestionFit:
     """Per-question outputs in training."""
+
     qid: str
     a_q: float
     b_q: float
-    pi_q: np.ndarray  # shape (5,) bucket probabilities
+    pi_q: np.ndarray
 
 
 @dataclass
 class BucketStats:
     """Global bucket statistics after training aggregation."""
-    pi_t: np.ndarray            # shape (5,)
-    a_t: np.ndarray             # shape (5,)
-    b_t: np.ndarray             # shape (5,)
+
+    pi_t: np.ndarray
+    a_t: np.ndarray
+    b_t: np.ndarray
 
 
 @dataclass
 class BudgetPlan:
     """Budget plan B_t for each bucket."""
-    B_t: np.ndarray  # shape (5,), integer budgets >= K0
+
+    B_t: np.ndarray
 
 
-@dataclass
-class OracleDifficultyModel:
-    """Difficulty buckets derived from full-answer fits (oracle setting)."""
-
-    thresholds_a: np.ndarray
-    thresholds_b: np.ndarray
-    probs_grid: np.ndarray
-    mean_a_grid: np.ndarray
-    mean_b_grid: np.ndarray
-
-
-# -----------------------------
-# Helper: bucket mapping
-# -----------------------------
-def count_pattern_4(samples4: Sequence, num_options: int = 4) -> Tuple[int, int, int, int]:
-    """Compute sorted count pattern from 4 samples.
-
-    Input:
-      samples4: length-4 list of answers (labels or indices)
-      num_options: 4 for multiple-choice
-    Output:
-      one of PATTERNS, as a tuple sorted descending, e.g. (3,1,0,0)
-    """
-    if len(samples4) != 4:
-        raise ValueError("samples4 must have length 4")
-
-    # Count frequencies
-    # NOTE: If answers are strings, we just count distinct; if you want strict 4-option set,
-    # map to {0,1,2,3} beforehand.
-    from collections import Counter
-    ctr = Counter(samples4)
-    counts = sorted(ctr.values(), reverse=True)
-    # pad with zeros to length 4
-    counts = (counts + [0, 0, 0, 0])[:4]
-    return tuple(counts)  # type: ignore
-
-
-def bucket_from_pattern(pattern: Tuple[int, int, int, int]) -> int:
-    """Deterministic mapping g(C^(4)) -> bucket index in {1..5}.
-
-    Here we map patterns in the order listed in PATTERNS:
-      (4,0,0,0)->1, (3,1,0,0)->2, ..., (1,1,1,1)->5
-    """
-    try:
-        return PATTERNS.index(pattern) + 1
-    except ValueError:
-        raise ValueError(f"Unknown pattern {pattern}; expected one of {PATTERNS}")
-
-
-def bucket_from_samples4(samples4: Sequence) -> int:
-    """Convenience: samples4 -> pattern -> bucket."""
-    pat = count_pattern_4(samples4)
-    return bucket_from_pattern(pat)
-
-
-# -----------------------------
-# Accuracy curve + probit fit
-# -----------------------------
 def exact_prob_pick_argmax_multinom4(theta4, k, log_fact=None, *, mc_samples=20000, rng=None):
     """Probability majority vote picks argmax(theta) with tie uniform.
 
-    For >4 options (e.g., 10-choice items) the exact multinomial enumeration
-    explodes combinatorially; we switch to a Monte Carlo estimate in that case.
-    `log_fact` is kept for backward compatibility with the old exact version.
+    For >4 options the exact multinomial enumeration explodes combinatorially;
+    this implementation uses a Monte Carlo estimate in that case.
     """
     theta = np.asarray(theta4, dtype=float)
     theta = theta / theta.sum()
@@ -175,12 +87,10 @@ def exact_prob_pick_argmax_multinom4(theta4, k, log_fact=None, *, mc_samples=200
     if n_opt < 2:
         raise ValueError("theta must have length >= 2.")
 
-    # move argmax to front
     argmax_idx = int(np.argmax(theta))
     if argmax_idx != 0:
         theta = np.concatenate([[theta[argmax_idx]], theta[:argmax_idx], theta[argmax_idx + 1 :]])
 
-    # Exact enumeration for the 4-option case (cheap and stable).
     if n_opt == 4:
         if log_fact is None or len(log_fact) <= k:
             log_fact = [math.lgamma(i + 1) for i in range(k + 1)]
@@ -204,7 +114,6 @@ def exact_prob_pick_argmax_multinom4(theta4, k, log_fact=None, *, mc_samples=200
                     log_total = np.logaddexp(log_total, log_term)
         return float(math.exp(log_total))
 
-    # Monte Carlo fallback for higher-option cases (e.g., 10 choices).
     rng = np.random.default_rng(rng)
     mc_samples = int(mc_samples)
     if mc_samples <= 0:
@@ -217,64 +126,13 @@ def exact_prob_pick_argmax_multinom4(theta4, k, log_fact=None, *, mc_samples=200
     contrib = np.where(wins, 1.0 / tie_sizes, 0.0)
     return float(contrib.mean())
 
-def estimate_accuracy_curve_from_pool(
-    answers: Sequence,
-    correct: object,
-    k_max: int,
-    *,
-    num_trials: int = 0,
-    rng: Optional[np.random.Generator] = None,
-) -> np.ndarray:
-    """Estimate A_q(k) for k=1..k_max using multinomial majority probability.
-
-    The empirical label distribution is converted to a Multinomial(theta, k)
-    assumption (with replacement). Accuracy is the probability the correct
-    label wins majority vote with uniform tie-breaking. For 4-option cases we
-    compute it exactly; for higher-option cases (e.g., 10 choices) we rely on
-    Monte Carlo inside `exact_prob_pick_argmax_multinom4`.
-    """
-
-    # Build empirical theta over four options, placing the correct label first
-    ctr = Counter(answers)
-    if not ctr:
-        raise ValueError("empty answer pool")
-    if correct not in ctr:
-        ctr[correct] = 0
-
-    others = [opt for opt in ctr.keys() if opt != correct]
-    # If more than 3 other labels exist, keep the three most common to fit length-4 theta
-    others = sorted(others, key=lambda x: ctr[x], reverse=True)[:3]
-    while len(others) < 3:
-        # pad with dummy labels of zero count
-        placeholder = f"__dummy{len(others)}"
-        if placeholder not in ctr:
-            ctr[placeholder] = 0
-        others.append(placeholder)
-
-    counts = [ctr[correct]] + [ctr[o] for o in others]
-    theta = np.asarray(counts, dtype=float)
-
-    A = np.zeros(k_max + 1, dtype=float)
-    A[0] = 0.5  # convention; not used for fit typically
-    log_fact_cache = [math.lgamma(i + 1) for i in range(k_max + 1)]
-    for k in range(1, k_max + 1):
-        A[k] = exact_prob_pick_argmax_multinom4(theta, k, log_fact_cache)
-    return A
-
 
 def fit_2param_probit_sqrtk(
     A: np.ndarray,
     k_min: int = 3,
     k_max: Optional[int] = None,
 ) -> Tuple[float, float]:
-    """Fit A(k)=Phi(a*sqrt(k)+b) using least squares in probit space.
-
-    Input:
-      A: array indexed by k, shape (K+1,)
-      k_min/k_max: fitting range
-    Output:
-      (a, b)
-    """
+    """Fit A(k)=Phi(a*sqrt(k)+b) using least squares in probit space."""
     K = len(A) - 1
     if k_max is None:
         k_max = K
@@ -297,15 +155,6 @@ def A_probit(k: int, a: float, b: float) -> float:
     return float(norm.cdf(a * math.sqrt(k) + b))
 
 
-def delta_probit(k: int, a: float, b: float) -> float:
-    """Marginal gain Δ(k)=A(k+1)-A(k)."""
-    return A_probit(k + 1, a, b) - A_probit(k, a, b)
-
-
-# -----------------------------
-# Oracle difficulty helpers (full 64-answer fits)
-# -----------------------------
-
 def estimate_accuracy_curve_from_pool_oracle(
     answers: Sequence,
     correct: object,
@@ -314,16 +163,7 @@ def estimate_accuracy_curve_from_pool_oracle(
     num_trials: int = 0,
     rng: Optional[np.random.Generator] = None,
 ) -> np.ndarray:
-    """Estimate A_q(k) for k=1..k_max using multinomial majority probability.
-
-    The empirical label distribution is converted to a Multinomial(theta, k)
-    assumption (with replacement). Accuracy is the probability the correct
-    label wins majority vote with uniform tie-breaking. For 4-option cases we
-    compute it exactly; for higher-option cases (e.g., 10 choices) we rely on
-    Monte Carlo inside `exact_prob_pick_argmax_multinom4`.
-    """
-
-    # Build empirical theta over four options, placing the correct label first
+    """Estimate A_q(k) for k=1..k_max using multinomial majority probability."""
     ctr = Counter(answers)
     if not ctr:
         raise ValueError("empty answer pool")
@@ -331,11 +171,9 @@ def estimate_accuracy_curve_from_pool_oracle(
         ctr[correct] = 0
 
     others = [opt for opt in ctr.keys() if opt != correct]
-    # Keep up to 9 other labels to fit length-10 theta for 10-choice MMLU
     others = sorted(others, key=lambda x: ctr[x], reverse=True)[:9]
 
     while len(others) < 9:
-        # pad with dummy labels of zero count
         placeholder = f"__dummy{len(others)}"
         if placeholder not in ctr:
             ctr[placeholder] = 0
@@ -345,793 +183,11 @@ def estimate_accuracy_curve_from_pool_oracle(
     theta = np.asarray(counts, dtype=float)
 
     A = np.zeros(k_max + 1, dtype=float)
-    A[0] = 0.5  # convention; not used for fit typically
+    A[0] = 0.5
     log_fact_cache = [math.lgamma(i + 1) for i in range(k_max + 1)]
     for k in range(1, k_max + 1):
         A[k] = exact_prob_pick_argmax_multinom4(theta, k, log_fact_cache)
     return A
-
-def fit_question_difficulty_params(
-    question: QuestionRecord,
-    *,
-    k_max_curve: int = 40,
-    curve_mc_trials: int = 2000,
-) -> Optional[Tuple[float, float]]:
-    """Fit (a, b) parameters from the full answer pool for oracle evaluation."""
-    if question.correct is None or not question.answers:
-        return None
-
-    try:
-        A = estimate_accuracy_curve_from_pool_oracle(
-            question.answers,
-            question.correct,
-            k_max=k_max_curve,
-            num_trials=curve_mc_trials,
-        )
-        a_q, b_q = fit_2param_probit_sqrtk(A, k_min=3, k_max=min(k_max_curve, len(A) - 1))
-    except Exception:
-        return None
-    return a_q, b_q
-
-
-def compute_question_param_map(
-    questions: Sequence[QuestionRecord],
-    *,
-    k_max_curve: int = 40,
-    curve_mc_trials: int = 2000,
-) -> Dict[str, Tuple[float, float]]:
-    """Compute (a, b) fits for a list of questions."""
-    params: Dict[str, Tuple[float, float]] = {}
-    for q in questions:
-        fitted = fit_question_difficulty_params(q, k_max_curve=k_max_curve, curve_mc_trials=curve_mc_trials)
-        if fitted is not None:
-            params[q.qid] = fitted
-    return params
-
-
-def build_oracle_difficulty_model(
-    train_params: Dict[str, Tuple[float, float]],
-    *,
-    quantiles: Sequence[float] = ORACLE_QUANTILES,
-) -> Optional[OracleDifficultyModel]:
-    """Estimate oracle difficulty buckets using per-question (a, b) fits."""
-    if not train_params:
-        return None
-
-    a_values = np.asarray([v[0] for v in train_params.values()], dtype=float)
-    b_values = np.asarray([v[1] for v in train_params.values()], dtype=float)
-    if a_values.size == 0 or b_values.size == 0:
-        return None
-
-    thresholds_a = np.quantile(a_values, quantiles).astype(float) if quantiles else np.array([], dtype=float)
-    thresholds_b = np.quantile(b_values, quantiles).astype(float) if quantiles else np.array([], dtype=float)
-
-    num_bins_a = len(thresholds_a) + 1
-    num_bins_b = len(thresholds_b) + 1
-
-    counts = np.zeros((num_bins_a, num_bins_b), dtype=float)
-    sum_a = np.zeros_like(counts)
-    sum_b = np.zeros_like(counts)
-
-    for a_val, b_val in zip(a_values, b_values):
-        idx_a = int(np.searchsorted(thresholds_a, a_val, side="right"))
-        idx_b = int(np.searchsorted(thresholds_b, b_val, side="right"))
-        counts[idx_a, idx_b] += 1.0
-        sum_a[idx_a, idx_b] += a_val
-        sum_b[idx_a, idx_b] += b_val
-
-    total = counts.sum()
-    if total <= 0:
-        return None
-
-    probs_grid = counts / total
-    default_a = float(np.mean(a_values))
-    default_b = float(np.mean(b_values))
-    with np.errstate(divide="ignore", invalid="ignore"):
-        mean_a_grid = np.divide(sum_a, counts, where=counts > 0)
-        mean_b_grid = np.divide(sum_b, counts, where=counts > 0)
-    mean_a_grid = np.where(counts > 0, mean_a_grid, default_a)
-    mean_b_grid = np.where(counts > 0, mean_b_grid, default_b)
-
-    return OracleDifficultyModel(
-        thresholds_a=np.asarray(thresholds_a, dtype=float),
-        thresholds_b=np.asarray(thresholds_b, dtype=float),
-        probs_grid=probs_grid,
-        mean_a_grid=mean_a_grid,
-        mean_b_grid=mean_b_grid,
-    )
-
-
-def greedy_budget_allocation_oracle(
-    model: OracleDifficultyModel,
-    *,
-    average_budget: float,
-    B_max: int = 64,
-) -> Tuple[np.ndarray, float]:
-    """Greedy budget allocation over oracle difficulty bins."""
-    a_flat = model.mean_a_grid.reshape(-1, order="C")
-    b_flat = model.mean_b_grid.reshape(-1, order="C")
-    probs_flat = model.probs_grid.reshape(-1, order="C")
-
-    num_bins = a_flat.size
-    budgets_flat = np.zeros(num_bins, dtype=int)
-    used_budget = 0.0
-
-    heap: List[Tuple[float, int]] = []
-    for idx in range(num_bins):
-        if probs_flat[idx] <= 0:
-            continue
-        gain = delta_probit(0, a_flat[idx], b_flat[idx])
-        if gain > 0:
-            heapq.heappush(heap, (-gain, idx))
-
-    eps = 1e-12
-    while heap and used_budget + eps < average_budget:
-        neg_gain, idx = heapq.heappop(heap)
-        gain = -neg_gain
-        if gain <= 0:
-            continue
-        if budgets_flat[idx] >= B_max:
-            continue
-
-        cost = probs_flat[idx]
-        if used_budget + cost > average_budget + eps:
-            break
-
-        budgets_flat[idx] += 1
-        used_budget += cost
-
-        next_gain = delta_probit(budgets_flat[idx], a_flat[idx], b_flat[idx])
-        if budgets_flat[idx] < B_max and next_gain > 0:
-            heapq.heappush(heap, (-next_gain, idx))
-
-    # Ensure every bin receives at least one sample to avoid degenerate skips
-    for idx in range(num_bins):
-        if budgets_flat[idx] == 0 and budgets_flat[idx] < B_max:
-            budgets_flat[idx] = 1
-            used_budget += probs_flat[idx]
-
-    budget_grid = budgets_flat.reshape(model.mean_a_grid.shape, order="C")
-    return budget_grid, float(used_budget)
-
-
-def locate_param_bin_oracle(
-    a_value: float,
-    b_value: float,
-    thresholds_a: Sequence[float],
-    thresholds_b: Sequence[float],
-) -> Tuple[int, int]:
-    """Locate oracle bin index for (a, b) parameters."""
-    idx_a = int(np.searchsorted(thresholds_a, a_value, side="right"))
-    idx_b = int(np.searchsorted(thresholds_b, b_value, side="right"))
-    return idx_a, idx_b
-
-
-# -----------------------------
-# Voting
-# -----------------------------
-def majority_vote_with_tie_break(
-    samples: Sequence,
-    *,
-    rng: Optional[np.random.Generator] = None,
-):
-    """Majority vote with deterministic tie-break (alphabetical/min)."""
-    from collections import Counter
-
-    ctr = Counter(samples)
-    maxc = max(ctr.values())
-    winners = [x for x, c in ctr.items() if c == maxc]
-    # Tie-break to match predictor_param2: pick the minimal (alphabetical/ordered) entry
-    return min(winners)
-
-
-# -----------------------------
-# Training: estimate pi_q(t)
-# -----------------------------
-def estimate_pi_q_via_subsample4(
-    answers: Sequence,
-    *,
-    num_draws: int = 1000,
-    rng: Optional[np.random.Generator] = None,
-) -> np.ndarray:
-    """Estimate pi_q(t)=P(T_q=t | question q) by repeatedly drawing 4 samples.
-
-    Output:
-      pi_q: np.ndarray shape (5,), sums to 1
-    """
-    if rng is None:
-        rng = np.random.default_rng(0)
-
-    n = len(answers)
-    if n < 4:
-        raise ValueError("need at least 4 answers to subsample 4")
-
-    counts = np.zeros(NUM_BUCKETS, dtype=float)
-    for _ in range(num_draws):
-        idx = rng.choice(n, size=4, replace=False)
-        s4 = [answers[i] for i in idx]
-        t = bucket_from_samples4(s4)  # 1..5
-        counts[t - 1] += 1
-    pi_q = counts / counts.sum()
-    return pi_q
-
-
-def training_fit_all_questions(
-    train_questions: Sequence[QuestionRecord],
-    *,
-    k_max_curve: int = 32,
-    subsample4_draws: int = 2000,
-    curve_mc_trials: int = 2000,
-    rng_seed: int = 0,
-) -> List[PerQuestionFit]:
-    """Fit (a_q,b_q) and pi_q for each training question."""
-    rng = np.random.default_rng(rng_seed)
-    outputs: List[PerQuestionFit] = []
-
-    for q in train_questions:
-        if q.correct is None:
-            raise ValueError(f"Training question {q.qid} missing correct label (needed for A_q(k))")
-
-        # 1) Estimate A_q(k) (placeholder MC; replace with your method)
-        A = estimate_accuracy_curve_from_pool(
-            q.answers, q.correct, k_max=k_max_curve, num_trials=curve_mc_trials, rng=rng
-        )
-
-        # 2) Fit (a_q,b_q)
-        a_q, b_q = fit_2param_probit_sqrtk(A, k_min=3, k_max=min(k_max_curve, len(A) - 1))
-
-        # 3) Estimate pi_q(t)
-        pi_q = estimate_pi_q_via_subsample4(q.answers, num_draws=subsample4_draws, rng=rng)
-
-        outputs.append(PerQuestionFit(qid=q.qid, a_q=a_q, b_q=b_q, pi_q=pi_q))
-
-    return outputs
-
-
-def aggregate_bucket_stats(fits: Sequence[PerQuestionFit]) -> BucketStats:
-    """Compute pi_t and (a_t,b_t) via soft assignment."""
-    if not fits:
-        raise ValueError("empty fits")
-
-    # pi_t = E_q[pi_q(t)]
-    pi_stack = np.stack([f.pi_q for f in fits], axis=0)  # (Q,5)
-    pi_t = pi_stack.mean(axis=0)
-    pi_t = pi_t / pi_t.sum()
-
-    # (a_t,b_t) = weighted average of per-question params with weights pi_q(t)
-    a_qs = np.array([f.a_q for f in fits], dtype=float)  # (Q,)
-    b_qs = np.array([f.b_q for f in fits], dtype=float)  # (Q,)
-
-    weights = pi_stack  # (Q,5)
-    denom = weights.sum(axis=0) + 1e-12
-
-    a_t = (weights.T @ a_qs) / denom
-    b_t = (weights.T @ b_qs) / denom
-
-    return BucketStats(pi_t=pi_t, a_t=a_t, b_t=b_t)
-
-
-# -----------------------------
-# Offline budget calibration
-# -----------------------------
-def solve_budget_plan_greedy_marginal(
-    stats: BucketStats,
-    *,
-    B_bar: float,
-    B_max: int = 32,
-    k0: int = K0,
-) -> BudgetPlan:
-    """Greedy allocation under average budget, mirroring predictor_conf Algorithm 1."""
-    pi = stats.pi_t
-    a_t = stats.a_t
-    b_t = stats.b_t
-
-    # Initialize budgets at k0
-    B = np.full(NUM_BUCKETS, k0, dtype=int)
-    used_budget = float(np.sum(pi * B))
-
-    if used_budget >= B_bar:
-        # Already at or above budget; return baseline warm-up
-        return BudgetPlan(B_t=B)
-
-    def marginal_gain(idx: int, step: int = 1) -> float:
-        """Delta A when increasing bucket idx by `step`."""
-        cur = B[idx]
-        if cur + step > B_max:
-            return -math.inf
-        return A_probit(cur + step, a_t[idx], b_t[idx]) - A_probit(cur, a_t[idx], b_t[idx])
-
-    # Max-heap via negative gain
-    heap: List[Tuple[float, int, int]] = []
-    for t in range(NUM_BUCKETS):
-        gain = marginal_gain(t, step=1)
-        if gain > 0:
-            heapq.heappush(heap, (-gain, 1, t))
-
-    eps = 1e-12
-    while heap and used_budget + eps < B_bar:
-        neg_gain, step, t = heapq.heappop(heap)
-        gain = -neg_gain
-        cost = step * pi[t]
-
-        # If this step would exceed budget, stop (strict constraint)
-        if used_budget + cost > B_bar + eps:
-            break
-
-        # Apply allocation
-        B[t] += step
-        used_budget += cost
-
-        # Push next marginal gain if possible
-        next_gain = marginal_gain(t, step=1)
-        if next_gain > 0:
-            heapq.heappush(heap, (-next_gain, 1, t))
-
-    return BudgetPlan(B_t=B)
-
-
-# -----------------------------
-# Testing / streaming policy
-# -----------------------------
-def streaming_allocate_for_question(
-    sampler_fn,
-    *,
-    budget_plan: BudgetPlan,
-    rng: Optional[np.random.Generator] = None,
-) -> Dict[str, object]:
-    """Run streaming policy for one incoming question.
-
-    Input:
-      sampler_fn: callable that returns ONE new model response each time you call it.
-                  e.g., sampler_fn() -> "A"/"B"/"C"/"D"
-      budget_plan: B_t array
-    Output:
-      dict with:
-        - 'bucket': assigned bucket t (1..5)
-        - 'B_target': target total budget
-        - 'samples': list of collected responses (length B_target)
-        - 'final_pred': majority vote prediction after B_target samples
-    """
-    if rng is None:
-        rng = np.random.default_rng()
-
-    # 1) Warm up 4 samples
-    # K0 是全局常量，通常等于4，用于初始采样判断 bucket；见文件顶部或相关常量定义
-    samples = [sampler_fn() for _ in range(K0)]
-    t = bucket_from_samples4(samples)  # 1..5
-    B_target = int(budget_plan.B_t[t - 1])
-
-    # 2) Collect until reaching B_target
-    while len(samples) < B_target:
-        samples.append(sampler_fn())
-
-    final_pred = majority_vote_with_tie_break(samples, rng=rng)
-    return {
-        "bucket": t,
-        "B_target": B_target,
-        "samples": samples,
-        "final_pred": final_pred,
-    }
-
-
-# -----------------------------
-# High-level orchestration
-# -----------------------------
-def load_gpqa_jsonl(path: str) -> List[QuestionRecord]:
-    """Load GPQA JSONL file into QuestionRecord objects."""
-    records: List[QuestionRecord] = []
-    with open(path, "r", encoding="utf-8") as f:
-        for line in f:
-            if not line.strip():
-                continue
-            obj = json.loads(line)
-            qid = obj.get("id") or f"q{len(records)}"
-            answers = obj.get("answers", [])
-            #correct = obj.get("correct_letter") or obj.get("final")
-            correct = obj.get("final")
-            records.append(QuestionRecord(qid=qid, answers=answers, correct=correct))
-    return records
-
-
-def make_sampler_from_answers(
-    answers: Sequence,
-    *,
-    rng: Optional[np.random.Generator] = None,
-):
-    """Return a callable that emits answers sequentially (prefix-first, deterministic).
-
-    This mirrors predictor_param2's evaluation sampling: allocating B samples
-    for a question simply takes the first B answers from the pool. `rng` is
-    kept for API compatibility but not used here.
-    """
-    # rng kept to maintain the call signature; sampling is deterministic
-    pool = list(answers)
-    if not pool:
-        raise ValueError("empty answers for sampler")
-
-    def _sampler():
-        if not pool:
-            raise RuntimeError("sampler exhausted: no more answers in pool")
-        return pool.pop(0)
-
-    return _sampler
-
-
-def evaluate_streaming(
-    test_questions: Sequence[QuestionRecord],
-    budget_plan: BudgetPlan,
-    *,
-    rng_seed: int = 0,
-) -> Tuple[Dict[str, float], List[Dict[str, object]]]:
-    """Run streaming policy on a test split and compute accuracy + budget.
-
-    Ground truth for accuracy = per-question `correct` field from the JSONL
-    (e.g., `correct_letter` / `final` mapped into QuestionRecord.correct).
-    """
-    rng = np.random.default_rng(rng_seed)
-    results: List[Dict[str, object]] = []
-    correct = 0
-    evaluated = 0
-    skipped = 0
-    total_budget_used = 0.0
-
-    for q in test_questions:
-        if not q.answers:
-            skipped += 1
-            continue
-
-        sampler_fn = make_sampler_from_answers(q.answers, rng=rng)
-        out = streaming_allocate_for_question(sampler_fn, budget_plan=budget_plan, rng=rng)
-        total_budget_used += float(len(out["samples"]))
-
-        has_label = q.correct is not None
-        is_correct = has_label and out["final_pred"] == q.correct
-        if has_label:
-            evaluated += 1
-            correct += int(is_correct)
-        else:
-            skipped += 1
-
-        out.update({"qid": q.qid, "correct": q.correct, "is_correct": is_correct})
-        results.append(out)
-
-    accuracy = correct / evaluated if evaluated else float("nan")
-    metrics = {
-        "accuracy": accuracy,
-        "evaluated": float(evaluated),
-        "skipped": float(skipped),
-        "correct": float(correct),
-        "total_budget_used": total_budget_used,
-    }
-    return metrics, results
-
-
-def evaluate_fixed_budget_majority(
-    test_questions: Sequence[QuestionRecord],
-    per_question_budget: int,
-    *,
-    rng_seed: int = 0,
-) -> Dict[str, float]:
-    """Baseline: uniform fixed budget per question with majority vote.
-
-    Ground truth for accuracy = per-question `correct` field in QuestionRecord.
-    """
-    rng = np.random.default_rng(rng_seed)
-    budget = max(K0, int(per_question_budget))
-
-    evaluated = 0
-    skipped = 0
-    correct = 0
-    total_budget_used = 0.0
-
-    for q in test_questions:
-        answers = list(q.answers)
-        if not answers:
-            skipped += 1
-            continue
-
-        k = min(budget, len(answers))
-        samples = answers[:k]
-        total_budget_used += float(len(samples))
-
-        has_label = q.correct is not None
-        pred = majority_vote_with_tie_break(samples, rng=rng)
-        is_correct = has_label and pred == q.correct
-        if has_label:
-            evaluated += 1
-            correct += int(is_correct)
-        else:
-            skipped += 1
-
-    accuracy = correct / evaluated if evaluated else float("nan")
-    return {
-        "accuracy": accuracy,
-        "evaluated": float(evaluated),
-        "skipped": float(skipped),
-        "correct": float(correct),
-        "total_budget_used": total_budget_used,
-    }
-
-
-def evaluate_oracle_setting(
-    train_questions: Sequence[QuestionRecord],
-    test_questions: Sequence[QuestionRecord],
-    *,
-    average_budget: float,
-    max_per_question: int,
-    k_max_curve: int = 40,
-    curve_mc_trials: int = 2000,
-    quantiles: Sequence[float] = ORACLE_QUANTILES,
-    oracle_model_override: Optional[OracleDifficultyModel] = None,
-    oracle_test_params_override: Optional[Dict[str, Tuple[float, float]]] = None,
-) -> Tuple[
-    Optional[Dict[str, float]],
-    Optional[float],
-    Optional[np.ndarray],
-    Optional[OracleDifficultyModel],
-    Dict[str, Tuple[float, float]],
-]:
-    """End-to-end oracle evaluation using full-answer fits and greedy allocation.
-
-    If overrides are provided, reuse the supplied oracle model and test params
-    (avoids recomputing during sweeps). Otherwise, fits are recomputed.
-    """
-    oracle_model = oracle_model_override
-    test_params = oracle_test_params_override
-
-    if oracle_model is None or test_params is None:
-        train_params = compute_question_param_map(
-            train_questions,
-            k_max_curve=k_max_curve,
-            curve_mc_trials=curve_mc_trials,
-        )
-        test_params = compute_question_param_map(
-            test_questions,
-            k_max_curve=k_max_curve,
-            curve_mc_trials=curve_mc_trials,
-        )
-        oracle_model = build_oracle_difficulty_model(train_params, quantiles=quantiles)
-
-    if oracle_model is None or not test_params:
-        return None, None, None, oracle_model, test_params
-
-    budget_grid, _ = greedy_budget_allocation_oracle(
-        oracle_model,
-        average_budget=average_budget,
-        B_max=max_per_question,
-    )
-    expected_budget = float(np.sum(oracle_model.probs_grid * budget_grid))
-
-    evaluated = 0
-    correct = 0
-    skipped = 0
-    total_budget_used = 0.0
-    per_bucket_budget = np.zeros_like(budget_grid, dtype=float)
-
-    for q in test_questions:
-        params = test_params.get(q.qid)
-        if params is None or not q.answers or q.correct is None:
-            skipped += 1
-            continue
-        a_val, b_val = params
-        idx_a, idx_b = locate_param_bin_oracle(a_val, b_val, oracle_model.thresholds_a, oracle_model.thresholds_b)
-        if idx_a >= budget_grid.shape[0] or idx_b >= budget_grid.shape[1]:
-            skipped += 1
-            continue
-
-        budget = int(budget_grid[idx_a, idx_b])
-        if budget <= 0:
-            skipped += 1
-            continue
-
-        samples = list(q.answers)[:budget]
-        if not samples:
-            skipped += 1
-            continue
-
-        total_budget_used += float(len(samples))
-        per_bucket_budget[idx_a, idx_b] += len(samples)
-
-        pred = majority_vote_with_tie_break(samples)
-        if pred is None:
-            skipped += 1
-            continue
-
-        evaluated += 1
-        if pred == q.correct:
-            correct += 1
-
-    accuracy = correct / evaluated if evaluated else float("nan")
-    metrics = {
-        "accuracy": accuracy,
-        "evaluated": float(evaluated),
-        "skipped": float(skipped),
-        "correct": float(correct),
-        "total_budget_used": total_budget_used,
-        "per_bucket_budget": per_bucket_budget,
-    }
-    return metrics, expected_budget, budget_grid, oracle_model, test_params
-
-
-def shuffle_question_records(
-    records: Sequence[QuestionRecord],
-    rng: random.Random,
-) -> List[QuestionRecord]:
-    """Return a copy of QuestionRecords with answers shuffled per question."""
-    shuffled: List[QuestionRecord] = []
-    for record in records:
-        answers_obj = record.answers
-        if isinstance(answers_obj, Sequence) and not isinstance(answers_obj, (str, bytes)):
-            answers_list = list(answers_obj)
-            indices = list(range(len(answers_list)))
-            rng.shuffle(indices)
-            shuffled_answers = [answers_list[idx] for idx in indices]
-            if isinstance(answers_obj, tuple):
-                shuffled_answers = tuple(shuffled_answers)
-        else:
-            shuffled_answers = answers_obj
-        shuffled.append(
-            QuestionRecord(
-                qid=record.qid,
-                answers=shuffled_answers,
-                correct=record.correct,
-            )
-        )
-    return shuffled
-
-
-def aggregate_multi_run_accuracy_stats(
-    sweep_runs: Sequence[Tuple[int, Sequence[Dict[str, object]]]]
-) -> Dict[str, List[Dict[str, Union[float, int]]]]:
-    """Compute accuracy statistics grouped by total budget for predictor/baseline/oracle."""
-    if not sweep_runs:
-        return {"predictor": [], "baseline": [], "oracle": []}
-
-    def _default_bucket() -> Dict[str, List[float]]:
-        return {
-            "totals": [],
-            "accuracies": [],
-            "avg_budgets": [],
-        }
-
-    predictor_data: Dict[int, Dict[str, List[float]]] = defaultdict(_default_bucket)
-    baseline_data: Dict[int, Dict[str, List[float]]] = defaultdict(_default_bucket)
-    oracle_data: Dict[int, Dict[str, List[float]]] = defaultdict(_default_bucket)
-
-    for _, rows in sweep_runs:
-        for row in rows:
-            avg_budget = float(row.get("average_budget", 0.0))
-            avg_key = int(round(avg_budget))
-
-            pred_total_raw = float(row.get("predictor_total", 0.0))
-            base_total_raw = float(row.get("baseline_total", 0.0))
-
-            predictor_bucket = predictor_data[avg_key]
-            predictor_bucket["totals"].append(pred_total_raw)
-            predictor_bucket["accuracies"].append(float(row.get("predictor_accuracy", 0.0)))
-            predictor_bucket["avg_budgets"].append(avg_budget)
-
-            baseline_bucket = baseline_data[avg_key]
-            baseline_bucket["totals"].append(base_total_raw)
-            baseline_bucket["accuracies"].append(float(row.get("baseline_accuracy", 0.0)))
-            baseline_bucket["avg_budgets"].append(avg_budget)
-
-            oracle_total_raw = row.get("oracle_total")
-            oracle_acc_raw = row.get("oracle_accuracy")
-            if oracle_total_raw is not None and oracle_acc_raw is not None:
-                oracle_bucket = oracle_data[avg_key]
-                oracle_bucket["totals"].append(float(oracle_total_raw))
-                oracle_bucket["accuracies"].append(float(oracle_acc_raw))
-                oracle_bucket["avg_budgets"].append(avg_budget)
-
-    def _summarize(buckets: Dict[int, Dict[str, List[float]]]) -> List[Dict[str, Union[float, int]]]:
-        summaries: List[Dict[str, Union[float, int]]] = []
-        for key in sorted(buckets.keys()):
-            totals = np.asarray(buckets[key]["totals"], dtype=float)
-            accuracies = np.asarray(buckets[key]["accuracies"], dtype=float)
-            avg_budgets = np.asarray(buckets[key]["avg_budgets"], dtype=float)
-
-            acc_mean = float(np.mean(accuracies)) if accuracies.size else float("nan")
-            if accuracies.size > 1:
-                acc_std = float(np.std(accuracies, ddof=1))
-            else:
-                acc_std = 0.0 if accuracies.size else float("nan")
-
-            total_mean = float(np.mean(totals)) if totals.size else float("nan")
-            if totals.size > 1:
-                total_std = float(np.std(totals, ddof=1))
-            else:
-                total_std = 0.0 if totals.size else float("nan")
-
-            avg_budget_mean = float(np.mean(avg_budgets)) if avg_budgets.size else float("nan")
-            if avg_budgets.size > 1:
-                avg_budget_std = float(np.std(avg_budgets, ddof=1))
-            else:
-                avg_budget_std = 0.0 if avg_budgets.size else float("nan")
-
-            summaries.append(
-                {
-                    "avg_budget_rounded": float(key),
-                    "total_budget": float(np.mean(totals)) if totals.size else float("nan"),
-                    "total_mean": total_mean,
-                    "total_std": total_std,
-                    "accuracy_mean": acc_mean,
-                    "accuracy_std": acc_std,
-                    "avg_budget_mean": avg_budget_mean,
-                    "avg_budget_std": avg_budget_std,
-                    "num_runs": int(accuracies.size),
-                }
-            )
-        return summaries
-
-    return {
-        "predictor": _summarize(predictor_data),
-        "baseline": _summarize(baseline_data),
-        "oracle": _summarize(oracle_data),
-    }
-
-
-def sweep_average_budgets(
-    stats: BucketStats, # predictor stats
-    test_questions: Sequence[QuestionRecord], # test questions
-    *,
-    sweep_max: int,
-    B_max: int,
-    rng_seed: int = 0,
-    oracle_model: Optional[OracleDifficultyModel] = None, # oracle model
-    oracle_test_params: Optional[Dict[str, Tuple[float, float]]] = None, # oracle test params
-) -> List[Dict[str, object]]:
-    """Sweep average budgets and collect predictor/baseline metrics."""
-    rows: List[Dict[str, object]] = []
-
-    start_budget = max(K0, 1)
-    for avg_budget in range(start_budget, sweep_max + 1):
-        # predictor budget plan
-        plan = solve_budget_plan_greedy_marginal(stats, B_bar=float(avg_budget), B_max=B_max, k0=K0)
-        # predictor evaluation
-        predictor_metrics, _ = evaluate_streaming(test_questions, plan, rng_seed=rng_seed)
-        # baseline evaluation
-        baseline_metrics = evaluate_fixed_budget_majority(
-            test_questions, per_question_budget=avg_budget, rng_seed=rng_seed
-        )
-        expected_budget = float(np.sum(stats.pi_t * plan.B_t))
-        # oracle evaluation
-        oracle_metrics: Optional[Dict[str, object]] = None
-        oracle_budget_grid: Optional[np.ndarray] = None
-        oracle_expected = None
-        if oracle_model is not None and oracle_test_params is not None:
-            oracle_metrics, oracle_expected, oracle_budget_grid, _, _ = evaluate_oracle_setting(
-                train_questions=[],
-                test_questions=test_questions,
-                average_budget=float(avg_budget),
-                max_per_question=B_max,
-                oracle_model_override=oracle_model,
-                oracle_test_params_override=oracle_test_params,
-                k_max_curve=0,
-                curve_mc_trials=0,
-            )
-
-        rows.append(
-            {
-                "average_budget": avg_budget,
-                "predictor_total": predictor_metrics["total_budget_used"],
-                "predictor_accuracy": predictor_metrics["accuracy"],
-                "predictor_expected": expected_budget,
-                "predictor_evaluated": predictor_metrics["evaluated"],
-                "predictor_skipped": predictor_metrics["skipped"],
-                "baseline_total": baseline_metrics["total_budget_used"],
-                "baseline_accuracy": baseline_metrics["accuracy"],
-                "baseline_evaluated": baseline_metrics["evaluated"],
-                "baseline_skipped": baseline_metrics["skipped"],
-                "budget_plan": plan.B_t.tolist(),
-                "oracle_total": oracle_metrics["total_budget_used"] if oracle_metrics else None,
-                "oracle_accuracy": oracle_metrics["accuracy"] if oracle_metrics else None,
-                "oracle_expected": oracle_expected,
-                "oracle_budget_grid": oracle_budget_grid.tolist() if oracle_budget_grid is not None else None,
-            }
-        )
-
-    return rows
 
 
 def plot_sweep_results(
@@ -1196,317 +252,19 @@ def plot_sweep_results(
     print(f"Saved sweep plot to {plot_path}")
 
 
-def plot_oracle_ab_distributions(
-    train_params: Dict[str, Tuple[float, float]],
-    plot_path: Optional[Path],
-    *,
-    title_suffix: str = "",
-    bins: int = 40,
-) -> None:
-    """Plot train-time oracle (a,b) fit distributions and save a PNG."""
-    if not train_params or plot_path is None:
-        return
-
-    a_vals = np.asarray([v[0] for v in train_params.values()], dtype=float)
-    b_vals = np.asarray([v[1] for v in train_params.values()], dtype=float)
-    if a_vals.size == 0 or b_vals.size == 0:
-        return
-
-    fig, axes = plt.subplots(1, 3, figsize=(14, 4))
-
-    axes[0].hist(a_vals, bins=bins, color="#0072b2", alpha=0.85)
-    axes[0].set_title("Oracle train fit: a distribution")
-    axes[0].set_xlabel("a")
-    axes[0].set_ylabel("count")
-    axes[0].grid(True, linestyle="--", alpha=0.25)
-
-    axes[1].hist(b_vals, bins=bins, color="#d55e00", alpha=0.85)
-    axes[1].set_title("Oracle train fit: b distribution")
-    axes[1].set_xlabel("b")
-    axes[1].set_ylabel("count")
-    axes[1].grid(True, linestyle="--", alpha=0.25)
-
-    h = axes[2].hist2d(a_vals, b_vals, bins=bins, cmap="viridis")
-    axes[2].set_title("Oracle train fit: joint (a,b)")
-    axes[2].set_xlabel("a")
-    axes[2].set_ylabel("b")
-    fig.colorbar(h[3], ax=axes[2], fraction=0.046, pad=0.04, label="count")
-
-    title_line = "Oracle (a,b) fit distributions"
-    if title_suffix:
-        title_line += f"\n{title_suffix}"
-    fig.suptitle(title_line, y=1.02)
-
-    fig.tight_layout()
-    fig.savefig(plot_path, dpi=300, bbox_inches="tight")
-    plt.close(fig)
-    print(f"Saved oracle (a,b) distribution plot to {plot_path}")
+class _BaseNamespace:
+    """Local compatibility namespace replacing `import mmlu_streaming as base`."""
 
 
-def plot_multi_run_sweeps(
-    sweep_runs: Sequence[Tuple[int, Sequence[Dict[str, object]]]],
-    plot_path: Optional[Path],
-    *,
-    title_suffix: str,
-    num_runs: int,
-    csv_path: Optional[Path] = None,
-) -> None:
-    """Plot multi-run predictor/baseline/oracle curves on a single figure and save summary CSV."""
-    if not sweep_runs or not plot_path:
-        return
-
-    if csv_path is None:
-        csv_path = plot_path.with_suffix(".csv")
-
-    plt.figure(figsize=(8, 5))
-    warm_colors = plt.cm.OrRd(np.linspace(0.4, 0.95, max(num_runs, 1)))
-    cool_colors = plt.cm.Blues(np.linspace(0.4, 0.95, max(num_runs, 1)))
-    oracle_colors = plt.cm.Greys(np.linspace(0.4, 0.85, max(num_runs, 1)))
-
-    for idx, (_run_idx, rows) in enumerate(sweep_runs):
-        predictor_x = [row["predictor_total"] for row in rows]
-        predictor_y = [row["predictor_accuracy"] for row in rows]
-        baseline_x = [row["baseline_total"] for row in rows]
-        baseline_y = [row["baseline_accuracy"] for row in rows]
-        oracle_points = [
-            (row.get("oracle_total"), row.get("oracle_accuracy"))
-            for row in rows
-            if row.get("oracle_total") is not None and row.get("oracle_accuracy") is not None
-        ]
-        oracle_x = [pt[0] for pt in oracle_points]
-        oracle_y = [pt[1] for pt in oracle_points]
-
-        predictor_color = warm_colors[idx] if len(warm_colors) > idx else "#d55e00"
-        baseline_color = cool_colors[idx] if len(cool_colors) > idx else "#0072b2"
-
-        plt.plot(
-            predictor_x,
-            predictor_y,
-            marker="o",
-            markersize=1,
-            color=predictor_color,
-            alpha=0.15,
-        )
-        plt.plot(
-            baseline_x,
-            baseline_y,
-            marker="o",
-            markersize=1,
-            linestyle="--",
-            color=baseline_color,
-            alpha=0.15,
-        )
-        if oracle_x and oracle_y:
-            oracle_color = oracle_colors[idx] if len(oracle_colors) > idx else "#6c757d"
-            plt.plot(
-                oracle_x,
-                oracle_y,
-                marker="o",
-                markersize=1,
-                linestyle=":",
-                color=oracle_color,
-                alpha=0.15,
-            )
-
-    summaries = aggregate_multi_run_accuracy_stats(sweep_runs)
-
-    if csv_path:
-        fieldnames = [
-            "model",
-            "avg_budget_rounded",
-            "total_mean",
-            "total_std",
-            "accuracy_mean",
-            "accuracy_std",
-            "avg_budget_mean",
-            "avg_budget_std",
-            "num_runs",
-        ]
-        csv_rows: List[Dict[str, Union[str, float, int]]] = []
-        for model_name, entries in summaries.items():
-            for entry in entries:
-                csv_rows.append(
-                    {
-                        "model": model_name,
-                        "avg_budget_rounded": entry.get("avg_budget_rounded", float("nan")),
-                        "total_mean": entry.get("total_mean", float("nan")),
-                        "total_std": entry.get("total_std", float("nan")),
-                        "accuracy_mean": entry.get("accuracy_mean", float("nan")),
-                        "accuracy_std": entry.get("accuracy_std", float("nan")),
-                        "avg_budget_mean": entry.get("avg_budget_mean", float("nan")),
-                        "avg_budget_std": entry.get("avg_budget_std", float("nan")),
-                        "num_runs": entry.get("num_runs", 0),
-                    }
-                )
-        if csv_rows:
-            csv_path.parent.mkdir(parents=True, exist_ok=True)
-            with csv_path.open("w", newline="") as f:
-                writer = csv.DictWriter(f, fieldnames=fieldnames)
-                writer.writeheader()
-                writer.writerows(csv_rows)
-            print(f"Saved multi-run sweep data to {csv_path}")
-
-    predictor_summary = summaries.get("predictor", [])
-    predictor_summary = [
-        entry
-        for entry in predictor_summary
-        if isinstance(entry.get("total_mean"), (int, float))
-        and math.isfinite(float(entry["total_mean"]))
-        and isinstance(entry.get("accuracy_mean"), (int, float))
-        and math.isfinite(float(entry["accuracy_mean"]))
-    ]
-    if predictor_summary:
-        predictor_totals = np.asarray([float(entry["total_mean"]) for entry in predictor_summary], dtype=float)
-        predictor_means = np.asarray([float(entry["accuracy_mean"]) for entry in predictor_summary], dtype=float)
-        predictor_stds = np.asarray([float(entry["accuracy_std"]) for entry in predictor_summary], dtype=float)
-
-        order = np.argsort(predictor_totals)
-        predictor_totals = predictor_totals[order]
-        predictor_means = predictor_means[order]
-        predictor_stds = predictor_stds[order]
-
-        plt.plot(
-            predictor_totals,
-            predictor_means,
-            color="#b22222",
-            linewidth=2.0,
-            marker="o",
-            markersize=2,
-            label="Predictor",
-        )
-        lower_pred = predictor_means - predictor_stds
-        upper_pred = predictor_means + predictor_stds
-        plt.fill_between(
-            predictor_totals,
-            lower_pred,
-            upper_pred,
-            color="#b22222",
-            alpha=0.12,
-            label="_nolegend_",
-        )
-
-    baseline_summary = summaries.get("baseline", [])
-    baseline_summary = [
-        entry
-        for entry in baseline_summary
-        if isinstance(entry.get("total_mean"), (int, float))
-        and math.isfinite(float(entry["total_mean"]))
-        and isinstance(entry.get("accuracy_mean"), (int, float))
-        and math.isfinite(float(entry["accuracy_mean"]))
-    ]
-    if baseline_summary:
-        baseline_totals = np.asarray([float(entry["total_mean"]) for entry in baseline_summary], dtype=float)
-        baseline_means = np.asarray([float(entry["accuracy_mean"]) for entry in baseline_summary], dtype=float)
-        baseline_stds = np.asarray([float(entry["accuracy_std"]) for entry in baseline_summary], dtype=float)
-
-        order = np.argsort(baseline_totals)
-        baseline_totals = baseline_totals[order]
-        baseline_means = baseline_means[order]
-        baseline_stds = baseline_stds[order]
-
-        plt.plot(
-            baseline_totals,
-            baseline_means,
-            color="#1f4e79",
-            linewidth=2.0,
-            linestyle="--",
-            marker="o",
-            markersize=2,
-            label="Base",
-        )
-        lower_base = baseline_means - baseline_stds
-        upper_base = baseline_means + baseline_stds
-        plt.fill_between(
-            baseline_totals,
-            lower_base,
-            upper_base,
-            color="#1f4e79",
-            alpha=0.12,
-            label="_nolegend_",
-        )
-
-    oracle_summary = summaries.get("oracle", [])
-    oracle_summary = [
-        entry
-        for entry in oracle_summary
-        if isinstance(entry.get("total_mean"), (int, float))
-        and math.isfinite(float(entry["total_mean"]))
-        and isinstance(entry.get("accuracy_mean"), (int, float))
-        and math.isfinite(float(entry["accuracy_mean"]))
-    ]
-    if oracle_summary:
-        oracle_totals = np.asarray([float(entry["total_mean"]) for entry in oracle_summary], dtype=float)
-        oracle_means = np.asarray([float(entry["accuracy_mean"]) for entry in oracle_summary], dtype=float)
-        oracle_stds = np.asarray([float(entry["accuracy_std"]) for entry in oracle_summary], dtype=float)
-
-        order = np.argsort(oracle_totals)
-        oracle_totals = oracle_totals[order]
-        oracle_means = oracle_means[order]
-        oracle_stds = oracle_stds[order]
-
-        plt.plot(
-            oracle_totals,
-            oracle_means,
-            color="#6c757d",
-            linewidth=2.0,
-            linestyle="-.",
-            marker="o",
-            markersize=2,
-            label="Oracle",
-        )
-        lower_oracle = oracle_means - oracle_stds
-        upper_oracle = oracle_means + oracle_stds
-        plt.fill_between(
-            oracle_totals,
-            lower_oracle,
-            upper_oracle,
-            color="#6c757d",
-            alpha=0.12,
-            label="_nolegend_",
-        )
-
-    plt.xlabel("Total budget consumed")
-    plt.ylabel("Consistency Rate")
-    title_line = "Consistency Rate vs Total Budget (multi-run)"
-    if title_suffix:
-        title_line += f"\n{title_suffix}"
-    plt.title(title_line)
-    plt.grid(True, linestyle="--", alpha=0.4)
-    plt.legend(loc="lower right")
-    plt.tight_layout()
-    plt.savefig(plot_path, dpi=300)
-    plt.close()
-    print(f"Saved multi-run sweep plot to {plot_path}")
-
-
-# predictor training and evaluation setup
-def train_and_build_budget_plan(
-    train_questions: Sequence[QuestionRecord],
-    *,
-    B_bar: float,
-    k_max_curve: int = 40,
-    subsample4_draws: int = 2000,
-    curve_mc_trials: int = 2000,
-    B_max: int = 64,
-    rng_seed: int = 0,
-) -> Tuple[BucketStats, BudgetPlan]:
-    """End-to-end training: fits -> bucket stats -> budget plan."""
-    fits = training_fit_all_questions(
-        train_questions,
-        k_max_curve=k_max_curve,
-        subsample4_draws=subsample4_draws,
-        curve_mc_trials=curve_mc_trials,
-        rng_seed=rng_seed,
-    )
-    stats = aggregate_bucket_stats(fits)
-    plan = solve_budget_plan_greedy_marginal(stats, B_bar=B_bar, B_max=B_max, k0=K0)
-    return stats, plan
-
-
-# -----------------------------
-# CLI entrypoint
-# -----------------------------
-
+base = _BaseNamespace()
+base.K0 = K0
+base.PerQuestionFit = PerQuestionFit
+base.BucketStats = BucketStats
+base.BudgetPlan = BudgetPlan
+base.A_probit = A_probit
+base.estimate_accuracy_curve_from_pool_oracle = estimate_accuracy_curve_from_pool_oracle
+base.fit_2param_probit_sqrtk = fit_2param_probit_sqrtk
+base.plot_sweep_results = plot_sweep_results
 def stable_marginal_gain_probit_sqrtk(
     cur_k: int,
     a: float,
@@ -1520,7 +278,7 @@ def stable_marginal_gain_probit_sqrtk(
       cdf(x2) - cdf(x1) = sf(x1) - sf(x2)
     and computing the difference in log-space.
 
-    Falls back to `A_probit` difference if scipy/logsf is unavailable.
+    Falls back to `base.A_probit` difference if scipy/logsf is unavailable.
     """
     cur_k = int(cur_k)
     step = int(step)
@@ -1551,7 +309,7 @@ def stable_marginal_gain_probit_sqrtk(
         return float(sf1 * (-math.expm1(logsf2 - logsf1)))
     except Exception:
         try:
-            return float(A_probit(next_k, a, b) - A_probit(cur_k, a, b))
+            return float(base.A_probit(next_k, a, b) - base.A_probit(cur_k, a, b))
         except Exception:
             return 0.0
 
@@ -1741,13 +499,13 @@ def fit_question_difficulty_params(
     if not capped_answers:
         return None
     try:
-        A = estimate_accuracy_curve_from_pool_oracle(
+        A = base.estimate_accuracy_curve_from_pool_oracle(
             capped_answers,
             train_label,
             k_max=int(k_max_curve),
             num_trials=int(curve_mc_trials),
         )
-        a_q, b_q = fit_2param_probit_sqrtk(A, k_min=3, k_max=min(int(k_max_curve), len(A) - 1))
+        a_q, b_q = base.fit_2param_probit_sqrtk(A, k_min=3, k_max=min(int(k_max_curve), len(A) - 1))
     except Exception:
         return None
     return float(a_q), float(b_q)
@@ -1783,7 +541,7 @@ def build_oracle_difficulty_model(
     """Fit KMeans(k=2) model on training (a,b) and return ordered bucket centers + probs."""
     return build_oracle_difficulty_model_from_params(
         train_params,
-        score_fn=lambda a, b: float(A_probit(1, float(a), float(b))),
+        score_fn=lambda a, b: float(base.A_probit(1, float(a), float(b))),
         k=int(k),
         random_seed=int(random_seed),
     )
@@ -1872,7 +630,7 @@ def evaluate_oracle_setting(
         average_budget=float(average_budget),
         B_max=int(max_per_question),
         # Align budget accounting with OKG/Base: enforce at least K0 attempts.
-        min_budget=int(K0),
+        min_budget=int(base.K0),
     )
     expected_budget = float(np.sum(oracle_model.probs * budget_by_bucket))
 
@@ -2011,8 +769,8 @@ def bucket2_from_samples4(samples4: Sequence[str]) -> int:
     - bucket 1: 4 warm-up accepted answers are all identical
     - bucket 2: otherwise (there exists at least one disagreement)
     """
-    if len(samples4) != int(K0):
-        raise ValueError(f"samples4 must have length {int(K0)}")
+    if len(samples4) != int(base.K0):
+        raise ValueError(f"samples4 must have length {int(base.K0)}")
     s = [_norm_str(x) for x in samples4]
     # empty strings should not appear in accepted, but treat them as normal tokens anyway
     return 1 if len(set(s)) == 1 else 2
@@ -2028,12 +786,12 @@ def estimate_pi_q2_via_subsample4(
     if rng is None:
         rng = np.random.default_rng(0)
     n = len(answers)
-    if n < int(K0):
-        raise ValueError(f"need at least {int(K0)} answers to subsample {int(K0)}")
+    if n < int(base.K0):
+        raise ValueError(f"need at least {int(base.K0)} answers to subsample {int(base.K0)}")
 
     counts = np.zeros(NUM_BUCKETS_SIMPLIFIED, dtype=float)
     for _ in range(int(num_draws)):
-        idx = rng.choice(n, size=int(K0), replace=False)
+        idx = rng.choice(n, size=int(base.K0), replace=False)
         s4 = [_norm_str(answers[i]) for i in idx]
         t = bucket2_from_samples4(s4)  # 1..2
         counts[t - 1] += 1.0
@@ -2041,7 +799,7 @@ def estimate_pi_q2_via_subsample4(
     return pi_q
 
 
-def aggregate_bucket2_stats(fits: Sequence[PerQuestionFit]) -> BucketStats:
+def aggregate_bucket2_stats(fits: Sequence[base.PerQuestionFit]) -> base.BucketStats:
     """Aggregate per-question fits into 2-bucket stats (pi_t, a_t, b_t)."""
     if not fits:
         raise ValueError("empty fits")
@@ -2059,30 +817,30 @@ def aggregate_bucket2_stats(fits: Sequence[PerQuestionFit]) -> BucketStats:
     denom = weights.sum(axis=0) + 1e-12
     a_t = (weights.T @ a_qs) / denom
     b_t = (weights.T @ b_qs) / denom
-    return BucketStats(pi_t=np.asarray(pi_t, dtype=float), a_t=np.asarray(a_t, dtype=float), b_t=np.asarray(b_t, dtype=float))
+    return base.BucketStats(pi_t=np.asarray(pi_t, dtype=float), a_t=np.asarray(a_t, dtype=float), b_t=np.asarray(b_t, dtype=float))
 
 
 def solve_budget_plan_greedy_marginal_anyk(
-    stats: BucketStats,
+    stats: base.BucketStats,
     *,
     B_bar: float,
     B_max: int,
     k0: int,
-) -> BudgetPlan:
+) -> base.BudgetPlan:
     """Greedy allocation under average budget, generalized to any number of buckets."""
     pi = np.asarray(stats.pi_t, dtype=float)
     a_t = np.asarray(stats.a_t, dtype=float)
     b_t = np.asarray(stats.b_t, dtype=float)
     k = int(pi.size)
     if k == 0:
-        return BudgetPlan(B_t=np.zeros((0,), dtype=int))
+        return base.BudgetPlan(B_t=np.zeros((0,), dtype=int))
     if a_t.size != k or b_t.size != k:
         raise ValueError("stats arrays must have matching sizes")
 
     B = np.full(k, int(k0), dtype=int)
     used_budget = float(np.sum(pi * B))
     if used_budget >= float(B_bar):
-        return BudgetPlan(B_t=B)
+        return base.BudgetPlan(B_t=B)
 
     import heapq
 
@@ -2117,7 +875,7 @@ def solve_budget_plan_greedy_marginal_anyk(
         if next_gain > 0 and B[t] < int(B_max):
             heapq.heappush(heap, (-next_gain, t))
 
-    return BudgetPlan(B_t=B)
+    return base.BudgetPlan(B_t=B)
 
 
 def vote_majority_earliest(answers: Sequence[str]) -> str:
@@ -2248,10 +1006,10 @@ def training_fit_all_questions(
     subsample4_draws: int = 2000,
     curve_mc_trials: int = 4000,
     rng_seed: int = 0,
-) -> List[PerQuestionFit]:
+) -> List[base.PerQuestionFit]:
     """AIME training: 10-choice curve estimation + 2-bucket pi_q via subsample4."""
     rng = np.random.default_rng(rng_seed)
-    outputs: List[PerQuestionFit] = []
+    outputs: List[base.PerQuestionFit] = []
 
     for q in train_questions:
         train_label = _training_label(q)
@@ -2264,20 +1022,20 @@ def training_fit_all_questions(
             raise ValueError(f"Question {q.qid} has empty answer pool after max_options filtering")
 
         # Estimate A_q(k) with a 10-choice multinomial (MC inside base for n_opt=10).
-        A = estimate_accuracy_curve_from_pool_oracle(
+        A = base.estimate_accuracy_curve_from_pool_oracle(
             capped_answers,
             train_label,
             k_max=k_max_curve,
             num_trials=curve_mc_trials,
             rng=rng,
         )
-        a_q, b_q = fit_2param_probit_sqrtk(A, k_min=3, k_max=min(k_max_curve, len(A) - 1))
+        a_q, b_q = base.fit_2param_probit_sqrtk(A, k_min=3, k_max=min(k_max_curve, len(A) - 1))
 
         # pi_q(t) depends only on the warm-up 4 pattern; max_options cap doesn't bind at 4.
         # Here we simplify to 2 buckets: all-4-same vs any disagreement.
         pi_q = estimate_pi_q2_via_subsample4(q.answers, num_draws=subsample4_draws, rng=rng)
 
-        outputs.append(PerQuestionFit(qid=q.qid, a_q=a_q, b_q=b_q, pi_q=pi_q))
+        outputs.append(base.PerQuestionFit(qid=q.qid, a_q=a_q, b_q=b_q, pi_q=pi_q))
 
     return outputs
 
@@ -2292,7 +1050,7 @@ def train_and_build_budget_plan(
     curve_mc_trials: int = 4000,
     max_per_question: int = 64,
     rng_seed: int = 0,
-) -> Tuple[BucketStats, BudgetPlan]:
+) -> Tuple[base.BucketStats, base.BudgetPlan]:
     fits = training_fit_all_questions(
         train_questions,
         max_options=max_options,
@@ -2306,7 +1064,7 @@ def train_and_build_budget_plan(
         stats,
         B_bar=float(average_budget),
         B_max=int(max_per_question),
-        k0=int(K0),
+        k0=int(base.K0),
     )
     return stats, plan
 
@@ -2314,7 +1072,7 @@ def train_and_build_budget_plan(
 def streaming_allocate_for_question(
     answers: Sequence[str],
     *,
-    budget_plan: BudgetPlan,
+    budget_plan: base.BudgetPlan,
     max_options: int,
     confs: Optional[Sequence[object]] = None,
     add_conf: bool = True,
@@ -2358,7 +1116,7 @@ def streaming_allocate_for_question(
         return a, w
 
     # 1) Warm up until we get 4 accepted samples (each attempt costs budget).
-    while len(accepted) < K0 and idx < len(pool):
+    while len(accepted) < base.K0 and idx < len(pool):
         a, w = _next_raw()
         attempted += 1
         status, _opt = map_fillin_answer_to_option(a, option_map, max_options=max_options)
@@ -2368,7 +1126,7 @@ def streaming_allocate_for_question(
         else:
             discarded += 1
 
-    if len(accepted) < K0:
+    if len(accepted) < base.K0:
         final_pred_conf = (
             weighted_vote_variant_majority_earliest(accepted, accepted_w, variant=str(conf_variant)) if add_conf else ""
         )
@@ -2383,7 +1141,7 @@ def streaming_allocate_for_question(
             "status": "exhausted_warmup",
         }
 
-    t = bucket2_from_samples4(accepted[: K0])  # 1..2
+    t = bucket2_from_samples4(accepted[: base.K0])  # 1..2
     B_target = int(budget_plan.B_t[t - 1])
 
     # 2) Continue attempting samples until reaching attempted budget B_target.
@@ -2415,7 +1173,7 @@ def streaming_allocate_for_question(
 
 def evaluate_streaming(
     test_questions: Sequence[QuestionRecord],
-    budget_plan: BudgetPlan,
+    budget_plan: base.BudgetPlan,
     *,
     max_options: int,
     add_conf: bool = True,
@@ -2526,7 +1284,7 @@ def evaluate_fixed_budget_majority(
     rng_seed: int = 0,
 ) -> Dict[str, float]:
     _ = np.random.default_rng(rng_seed)  # kept for API symmetry / future use
-    budget = max(int(K0), int(per_question_budget))
+    budget = max(int(base.K0), int(per_question_budget))
 
     evaluated_acc = 0
     evaluated_cons = 0
@@ -2611,7 +1369,7 @@ def evaluate_fixed_budget_majority(
 
 
 def sweep_average_budgets(
-    stats: BucketStats,
+    stats: base.BucketStats,
     test_questions: Sequence[QuestionRecord],
     *,
     max_options: int,
@@ -2624,13 +1382,13 @@ def sweep_average_budgets(
     oracle_test_params: Optional[Dict[str, Tuple[float, float]]] = None,
 ) -> List[Dict[str, object]]:
     rows: List[Dict[str, object]] = []
-    start_budget = max(int(K0), 1)
+    start_budget = max(int(base.K0), 1)
     for avg_budget in range(start_budget, int(sweep_max) + 1):
         plan = solve_budget_plan_greedy_marginal_anyk(
             stats,
             B_bar=float(avg_budget),
             B_max=int(max_per_question),
-            k0=int(K0),
+            k0=int(base.K0),
         )
         predictor_metrics, _ = evaluate_streaming(
             test_questions,
@@ -3384,7 +2142,7 @@ def main() -> None:
                 f"train={len(train_questions)}, test={len(test_questions)}, "
                 f"max_options={int(args.max_options)}, avg≤{int(args.sweep_max)}"
             )
-            plot_sweep_results(sweep_rows, Path(args.plot_path), title_suffix=title_suffix)
+            base.plot_sweep_results(sweep_rows, Path(args.plot_path), title_suffix=title_suffix)
             print("\nSweep results (avg_budget: pred_acc, base_acc, expected, B_t):")
             for row in sweep_rows:
                 print(
