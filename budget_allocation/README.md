@@ -64,8 +64,3 @@ Input is prediction JSONL where each line contains (at minimum):
 - optional confidence traces:
   - `trace_confidence` for confidence-weighted variants
 
-## Notes
-
-- `MultiChoice_online.py` now inlines the previously shared streaming utilities.
-- `FillintheBlank_online.py` now inlines the previously shared streaming utilities.
-- No extra base-module import is required for online scripts.
