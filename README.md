@@ -139,6 +139,20 @@ These overrides are applied transparently inside `common.process_question()`. No
 - **Answer Verification**: math-verify
 - **Monitoring Tools**: nvitop
 
+## Citation
+
+If you use PETS in your research, please cite:
+
+```bibtex
+@article{liu2026pets,
+  title={PETS: A Principled Framework Towards Optimal Trajectory Allocation for Efficient Test-Time Self-Consistency},
+  author={Liu, Zhangyi and Qu, Huaizhi and Yin, Xiaowei and Sun, He and Han, Yanjun and Chen, Tianlong and Deng, Zhun},
+  journal={arXiv preprint arXiv:2602.16745},
+  year={2026},
+  url={https://arxiv.org/abs/2602.16745}
+}
+```
+
 ## License
 
 MIT License
