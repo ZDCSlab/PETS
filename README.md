@@ -132,13 +132,6 @@ When the served model name contains `gpt` (e.g. `gpt-oss-120b`), PETS automatica
 
 These overrides are applied transparently inside `common.process_question()`. No user action is needed.
 
-## Tech Stack
-
-- **Inference Engine**: vLLM 0.15.1
-- **Data Processing**: HuggingFace Datasets
-- **Answer Verification**: math-verify
-- **Monitoring Tools**: nvitop
-
 ## Citation
 
 If you use PETS in your research, please cite:
